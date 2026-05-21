@@ -70,7 +70,10 @@ jobs:
           request = urllib.request.Request(
               webhook,
               data=json.dumps(payload).encode("utf-8"),
-              headers={"Content-Type": "application/json"},
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "RevivalDevlog (https://github.com/0x1-1/revival, 1.0)",
+              },
               method="POST",
           )
 
