@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "Machine-readable record of every binary patch applied to unpacked_Goley_.exe.",
+    "ImageBase is 0x00400000. Addresses below are absolute (image base + RVA).",
+    "When you change this file, update docs/IDA_PATCHES.md too.",
+    "",
+    "save_patched.py reads this with --apply to re-create unpacked_Goley_PATCHED.exe",
+    "without needing an interactive IDA session for each patch."
+  ],
+
+  "target": {
+    "input":      "C:\\Joygame\\Goley\\BinaryTr\\unpacked_Goley_.exe",
+    "output":     "C:\\Joygame\\Goley\\BinaryTr\\unpacked_Goley_PATCHED.exe",
+    "image_base": "0x00400000"
+  },
+
+  "patches": [
+    {
+      "id":        "P-1",
+      "name":      "GameGuard error reporter prologue",
+      "addr":      "0x00D39666",
+      "comment_function": "sub_D393F0 -- if(strlen(buf)) MessageBoxA(...)",
+      "comment":   "Replace prologue with xor eax,eax; ret 4 -- function becomes no-op.",
+      "size":      5,
+      "original_hint": "any normal x86 prologue (push ebp; mov ebp,esp; ...)",
+      "patched":   "33C0C20400"
+    },
+    {
+      "id":        "P-2",
+      "name":      "nProtect event callback always-success",
+      "addr":      "0x00D35720",
+      "comment_function": "sub_D35720 -- switch(event_code) error reporter",
+      "comment":   "Replace prologue with mov eax,1; ret 8 -- every event reports success without setting byte_12BAA08 or zeroing init_ok flag.",
+      "size":      8,
+      "original_hint": "55 8B EC 8B 45 08 05 17 FC FF FF ... (prologue + switch)",
+      "patched":   "B801000000C20800"
+    }
+  ],
+
+  "reverted_patches": [
+    {
+      "id":        "P-3",
+      "name":      "nProtect event dispatcher stub (REVERTED)",
+      "addr":      "0x008E70E0",
+      "comment":   "Stub-prologue patch (mov eax,1; ret 12). Caused Working Set to regress from 42 MB back to 26 MB because legitimate init also bypassed. Do not re-apply without a surgical replacement.",
+      "patched":   "B801000000C20C00"
+    }
+  ]
+}
