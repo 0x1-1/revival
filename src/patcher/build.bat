@@ -26,7 +26,7 @@ cl.exe /nologo /LD /O2 /MT ^
     minhook/trampoline.c ^
     minhook/hde/hde32.c ^
     /link /SUBSYSTEM:WINDOWS /MACHINE:X86 ^
-    user32.lib kernel32.lib ^
+    user32.lib kernel32.lib ws2_32.lib ^
     /OUT:revival_patcher.dll
 
 if %ERRORLEVEL% NEQ 0 (

@@ -1,0 +1,86 @@
+name: Discord Commit Log
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+
+jobs:
+  notify-discord:
+    if: ${{ !github.event.forced && github.event.deleted == false }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send commit log to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          PUSHER: ${{ github.actor }}
+          COMPARE_URL: ${{ github.event.compare }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+
+          webhook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+          if not webhook:
+              raise SystemExit("DISCORD_WEBHOOK_URL secret tanimli degil; islem iptal.")
+
+          with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as f:
+              event = json.load(f)
+
+          commits = event.get("commits", [])
+          if not commits:
+              print("Push payload icinde commit yok; sessiz cikis.")
+              raise SystemExit(0)
+
+          lines = []
+          for commit in commits[:10]:
+              sha = commit["id"][:7]
+              message = commit.get("message", "").splitlines()[0]
+              lines.append(f"- `{sha}` {message}")
+
+          remaining = len(commits) - 10
+          if remaining > 0:
+              lines.append(f"- ...ve {remaining} commit daha.")
+
+          content = (
+              f"Revival tarafinda yeni commit geldi.\n\n"
+              f"Branch: `{os.environ['BRANCH']}`\n"
+              f"Push eden: `{os.environ['PUSHER']}`\n\n"
+              + "\n".join(lines)
+              + f"\n\n{os.environ['COMPARE_URL']}"
+          )
+
+          payload = {
+              "username": "Revival Devlog",
+              "content": content,
+              "allowed_mentions": {"parse": []},
+          }
+
+          request = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "RevivalDevlog (https://github.com/0x1-1/revival, 1.0)",
+              },
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  print(response.status, response.reason)
+          except urllib.error.HTTPError as e:
+              body = e.read().decode("utf-8", errors="replace")
+              raise SystemExit(f"Discord webhook HTTP {e.code}: {body}")
+          PY

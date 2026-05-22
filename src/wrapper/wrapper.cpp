@@ -18,6 +18,7 @@
 // olur. Asil oyun runtime DllMain icinde basliyor.
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <string>
 
@@ -52,10 +53,34 @@ static void Log(const wchar_t* fmt, ...) {
 }
 
 // Inject DLL into the given (suspended) child process.
+// Target process module listesinde verilen basename'i ara.
+// Toolhelp32 SNAPMODULE | SNAPMODULE32 -- 32-bit hedef icin de calisir.
+static bool VerifyModuleLoaded(DWORD pid, const wchar_t* basename) {
+    DWORD flags = TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32;
+    for (int retry = 0; retry < 10; ++retry) {
+        HANDLE snap = CreateToolhelp32Snapshot(flags, pid);
+        if (snap == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_BAD_LENGTH) { Sleep(50); continue; }
+            return false;
+        }
+        MODULEENTRY32W me = { sizeof(me) };
+        bool found = false;
+        if (Module32FirstW(snap, &me)) {
+            do {
+                if (lstrcmpiW(me.szModule, basename) == 0) { found = true; break; }
+                me.dwSize = sizeof(me);
+            } while (Module32NextW(snap, &me));
+        }
+        CloseHandle(snap);
+        return found;
+    }
+    return false;
+}
+
 // Uses VirtualAllocEx + WriteProcessMemory + CreateRemoteThread(LoadLibraryW).
 // Child is CREATE_SUSPENDED so its address space is fully initialized AND
 // its main thread is paused -- CreateRemoteThread succeeds reliably here.
-static bool InjectDll(HANDLE hProcess, const wchar_t* dllPath) {
+static bool InjectDll(HANDLE hProcess, DWORD pid, const wchar_t* dllPath) {
     SIZE_T pathBytes = (lstrlenW(dllPath) + 1) * sizeof(wchar_t);
     LPVOID pRemote = VirtualAllocEx(hProcess, NULL, pathBytes,
                                     MEM_COMMIT | MEM_RESERVE,
@@ -87,8 +112,29 @@ static bool InjectDll(HANDLE hProcess, const wchar_t* dllPath) {
     DWORD exitCode = 0;
     GetExitCodeThread(hThread, &exitCode);
     CloseHandle(hThread);
-    Log(L"InjectDll: LoadLibraryW returned 0x%08lX (HMODULE)", exitCode);
-    return exitCode != 0;
+
+    // exitCode yorumu:
+    //   * NTSTATUS exception (0xC0000XXX, 0x80000XXX) -> thread CRASHED
+    //   * 0                                            -> LoadLibrary fail
+    //   * (HMODULE 32-bit)                             -> success
+    bool isException = ((exitCode & 0xF0000000) == 0xC0000000) ||
+                       ((exitCode & 0xF0000000) == 0x80000000);
+    if (isException) {
+        Log(L"InjectDll: remote thread CRASHED NTSTATUS=0x%08lX", exitCode);
+    } else if (exitCode == 0) {
+        Log(L"InjectDll: LoadLibraryW returned NULL -- load FAILED");
+    } else {
+        Log(L"InjectDll: LoadLibraryW returned 0x%08lX (HMODULE)", exitCode);
+    }
+
+    // Asil success kriteri: target module listesinde gercekten yuklu mu?
+    Sleep(200);
+    const wchar_t* base = wcsrchr(dllPath, L'\\');
+    base = base ? base + 1 : dllPath;
+    bool loaded = VerifyModuleLoaded(pid, base);
+    Log(L"InjectDll: VerifyModuleLoaded(%s) = %s",
+        base, loaded ? L"LOADED OK" : L"NOT FOUND");
+    return loaded;
 }
 
 // DLL ve log dosyasi yollarini exe'nin kendi konumuna gore hesaplar.
@@ -118,12 +164,24 @@ static void ResolvePaths(void) {
 int wmain(int argc, wchar_t* argv[]) {
     ResolvePaths();
     Log(L"===== wrapper.exe started, argc=%d =====", argc);
+    // Raw command-line: Windows'un GetCommandLineW'tan dondurdugu ham string.
+    // IFEO redirect sirasinda neyin geldigini netlestirmek icin gerekli.
+    LPCWSTR rawCmd = GetCommandLineW();
+    Log(L"  raw GetCommandLineW() = %s", rawCmd ? rawCmd : L"<null>");
     for (int i = 0; i < argc; i++) {
         Log(L"  argv[%d] = %s", i, argv[i]);
     }
+    // CWD ve env GLY_NO_WRAPPER de raporla
+    wchar_t cwd[MAX_PATH] = {0};
+    GetCurrentDirectoryW(MAX_PATH, cwd);
+    Log(L"  cwd = %s", cwd);
 
-    if (argc < 2) {
-        Log(L"Usage: wrapper.exe <exe_path> [args...]");
+    // argc == 1 -> sadece argv[0] (orig exe path), no args. Geçerli durum,
+    // wrapper bunu argumansiz spawn eder. Eskiden "Usage" deyip exit ediyordu;
+    // bu revival_tool launch komutunda (argumansiz Goley_.exe) wrapper'i
+    // hic is yapmamasina sebep oluyordu.
+    if (argc < 1) {
+        Log(L"FATAL: argc=0, no orig exe path");
         return 1;
     }
 
@@ -151,14 +209,43 @@ int wmain(int argc, wchar_t* argv[]) {
         Log(L"First wrapper instance -- env GLY_NO_WRAPPER=1 set");
     }
 
-    // IFEO passes the target exe path as argv[1], any original args follow.
-    std::wstring exePath = argv[1];
+    // IFEO konvention'i caller'a gore DEGISIR (kanitlandi):
+    //   Durum A (revival_tool launch): argv[0]=Goley_.exe basename, argv[1+]=args
+    //   Durum B (wrapper self-spawn): argv[0]=wrapper.exe full path, argv[1]=Goley_.exe, argv[2+]=args
+    // Yani argv[0]'i kosulsuz exePath kabul etmek FORK BOMB'a yol acar:
+    //   wrapper self-spawn DEBUG_PROCESS'te argv[0]=wrapper.exe -> exePath=wrapper.exe
+    //   -> wrapper sonsuz kendisi spawn -> 1163 instance.
+    //
+    // Cozum: argv[0] basename'ini kontrol et.
+    //   wrapper.exe ise -> argv[1] orig exe, argv[2+] args
+    //   degilse        -> argv[0] orig exe, argv[1+] args
+    int argStart;
+    std::wstring exePath;
+    {
+        const wchar_t* a0base = wcsrchr(argv[0], L'\\');
+        a0base = a0base ? a0base + 1 : argv[0];
+        if (_wcsicmp(a0base, L"revival_wrapper.exe") == 0) {
+            if (argc < 2) {
+                Log(L"FATAL: argv[0]=wrapper.exe ama argv[1] yok -- recursion limiti");
+                return 1;
+            }
+            exePath  = argv[1];
+            argStart = 2;
+            Log(L"  detected: argv[0]=wrapper.exe (self-spawn shape), exePath=argv[1]=%s",
+                argv[1]);
+        } else {
+            exePath  = argv[0];
+            argStart = 1;
+            Log(L"  detected: argv[0]=orig exe (IFEO redirect shape), exePath=argv[0]=%s",
+                argv[0]);
+        }
+    }
 
     std::wstring cmdLine;
     cmdLine += L"\"";
     cmdLine += exePath;
     cmdLine += L"\"";
-    for (int i = 2; i < argc; i++) {
+    for (int i = argStart; i < argc; i++) {
         cmdLine += L" ";
         cmdLine += argv[i];
     }
@@ -199,7 +286,7 @@ int wmain(int argc, wchar_t* argv[]) {
     // Inject our patcher DLL while the child is suspended. At this point
     // the child's main thread is created but paused -- nProtect's child-
     // side self-protect code hasn't run yet, so CreateRemoteThread works.
-    bool injected = InjectDll(pi.hProcess, DLL_PATH);
+    bool injected = InjectDll(pi.hProcess, pi.dwProcessId, DLL_PATH);
     Log(L"InjectDll returned %s", injected ? L"OK" : L"FAIL");
 
     // If we attached as debugger (recursive call), detach now so child

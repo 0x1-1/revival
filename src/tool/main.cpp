@@ -115,6 +115,10 @@ static const std::string& GoleyDir() {
 namespace cfg {
     static std::string GoleyExe()       { return GoleyDir() + "\\Goley_.exe"; }
     static std::string UnpackedExe()    { return GoleyDir() + "\\unpacked_Goley_PATCHED.exe"; }
+    // Launcher (root) -- Goley.exe is one level above GoleyDir (BinaryTr/).
+    // Parent of BinaryTr is the install root (typically C:\Joygame\Goley).
+    static std::string GoleyRoot()      { return GoleyDir() + "\\.."; }
+    static std::string LauncherExe()    { return GoleyRoot() + "\\Goley.exe"; }
     static std::string PatcherDll()     { return RepoRoot() + "\\src\\patcher\\revival_patcher.dll"; }
     static std::string WrapperExe()     { return RepoRoot() + "\\src\\wrapper\\revival_wrapper.exe"; }
     static std::string ApplyPatchesPy() { return RepoRoot() + "\\src\\tool\\apply_patches.py"; }
@@ -243,7 +247,32 @@ static int CmdIfeoShow(void) {
 // SELF_DLL_PATH'i target process'e kopyalar, LoadLibraryA(path) cagiran
 // bir thread spawn eder. Hem calisan hem CREATE_SUSPENDED target'larda
 // kernel32 map'lendigi surece calisir.
-static bool InjectIntoProcess(HANDLE hProcess, const char* dllPath) {
+
+// Target process module listesinde verilen basename'i ara (case-insensitive).
+// Toolhelp32 SNAPMODULE32 ile 32-bit hedef icin de calisir.
+static bool VerifyModuleLoaded(DWORD pid, const char* basename) {
+    DWORD flags = 0x00000008 | 0x00000010; // TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
+    for (int retry = 0; retry < 10; ++retry) {
+        HANDLE snap = CreateToolhelp32Snapshot(flags, pid);
+        if (snap == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == 24) { Sleep(50); continue; }
+            return false;
+        }
+        MODULEENTRY32 me = { sizeof(me) };
+        bool found = false;
+        if (Module32First(snap, &me)) {
+            do {
+                if (lstrcmpiA(me.szModule, basename) == 0) { found = true; break; }
+                me.dwSize = sizeof(me);
+            } while (Module32Next(snap, &me));
+        }
+        CloseHandle(snap);
+        return found;
+    }
+    return false;
+}
+
+static bool InjectIntoProcess(HANDLE hProcess, DWORD pid, const char* dllPath) {
     SIZE_T pathBytes = lstrlenA(dllPath) + 1;
     LPVOID remote = VirtualAllocEx(hProcess, NULL, pathBytes,
                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -262,8 +291,29 @@ static bool InjectIntoProcess(HANDLE hProcess, const char* dllPath) {
     DWORD exitCode = 0;
     GetExitCodeThread(thr, &exitCode);
     CloseHandle(thr);
-    info("  LoadLibraryA returned 0x%08lX (target HMODULE)", exitCode);
-    return exitCode != 0;
+
+    // exitCode yorumu:
+    //   * NTSTATUS exception code (0xC0000XXX, 0x80000XXX) -> thread CRASHED
+    //   * 0                                                 -> LoadLibrary fail
+    //   * (HMODULE 32-bit)                                  -> success
+    bool isException = ((exitCode & 0xF0000000) == 0xC0000000) ||
+                       ((exitCode & 0xF0000000) == 0x80000000);
+    if (isException) {
+        info("  LoadLibrary remote thread CRASHED with NTSTATUS 0x%08lX", exitCode);
+    } else if (exitCode == 0) {
+        info("  LoadLibrary returned NULL -- load FAILED");
+    } else {
+        info("  LoadLibrary returned 0x%08lX (HMODULE)", exitCode);
+    }
+
+    // Asil success kriteri: module list'te revival_patcher.dll var mi?
+    // Module list'in fill olmasi icin biraz bekle (yeni baslayan process'de).
+    Sleep(200);
+    const char* base = strrchr(dllPath, '\\');
+    base = base ? base + 1 : dllPath;
+    bool loaded = VerifyModuleLoaded(pid, base);
+    info("  Module verify (%s): %s", base, loaded ? "LOADED OK" : "NOT FOUND");
+    return loaded;
 }
 
 static int CmdInject(int argc, char** argv) {
@@ -274,7 +324,7 @@ static int CmdInject(int argc, char** argv) {
     HANDLE h = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!h) { err("OpenProcess(%lu) failed: %lu", pid, GetLastError()); return 1; }
     info("Inject ediliyor %s -> PID %lu...", cfg::PatcherDll().c_str(), pid);
-    bool ok = InjectIntoProcess(h, cfg::PatcherDll().c_str());
+    bool ok = InjectIntoProcess(h, pid, cfg::PatcherDll().c_str());
     CloseHandle(h);
     return ok ? 0 : 1;
 }
@@ -282,19 +332,30 @@ static int CmdInject(int argc, char** argv) {
 // --------------------------------------------------------------------
 // launch akisi (paylasimli)
 // --------------------------------------------------------------------
-static int LaunchAndInject(const char* exePath, const char* workDir) {
+static int LaunchAndInject(const char* exePath, const char* workDir,
+                            const char* extraArgs = NULL) {
     WarnIfNotAdmin("Goley_.exe manifest requireAdministrator");
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     info("Spawn ediliyor %s (CREATE_SUSPENDED)...", exePath);
-    if (!CreateProcessA(exePath, NULL, NULL, NULL, FALSE,
+    // CreateProcessA lpCommandLine: argv[0] = exe, sonra args.
+    // lpCommandLine MUTABLE olmali. Buffer hazirla.
+    char cmdLine[1024];
+    if (extraArgs && *extraArgs) {
+        _snprintf_s(cmdLine, sizeof(cmdLine), _TRUNCATE,
+                    "\"%s\" %s", exePath, extraArgs);
+        info("  cmdline=%s", cmdLine);
+    } else {
+        _snprintf_s(cmdLine, sizeof(cmdLine), _TRUNCATE, "\"%s\"", exePath);
+    }
+    if (!CreateProcessA(exePath, cmdLine, NULL, NULL, FALSE,
                         CREATE_SUSPENDED, NULL, workDir, &si, &pi)) {
         err("CreateProcessA failed: %lu (740 = elevation required)", GetLastError());
         return 1;
     }
     info("  PID=%lu, ana thread suspended", pi.dwProcessId);
     info("patcher.dll inject ediliyor...");
-    if (!InjectIntoProcess(pi.hProcess, cfg::PatcherDll().c_str())) {
+    if (!InjectIntoProcess(pi.hProcess, pi.dwProcessId, cfg::PatcherDll().c_str())) {
         err("Inject basarisiz. Child sonlandiriliyor.");
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
@@ -314,8 +375,61 @@ static int CmdLaunch(void) {
 }
 
 static int CmdLaunchUnpacked(void) {
-    // Statik patch yolu: Themida yok -> IFEO gereksiz.
-    return LaunchAndInject(cfg::UnpackedExe().c_str(), GoleyDir().c_str());
+    // Statik patch yolu: Themida yok. CREATE_SUSPENDED + immediate inject
+    // unpacked binary'de loader bitmemis kernel32 ile AV veriyor. Onun
+    // yerine ciplak baslat + 3 sn bekle + late inject.
+    const char* exePath = cfg::UnpackedExe().c_str();
+    const char* workDir = GoleyDir().c_str();
+    info("Naked spawn (no suspend) %s...", exePath);
+
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(exePath, NULL, NULL, NULL, FALSE,
+                        0, NULL, workDir, &si, &pi)) {
+        err("CreateProcessA failed: %lu", GetLastError());
+        return 1;
+    }
+    info("  PID=%lu", pi.dwProcessId);
+    info("3 sn bekleniyor (loader/CRT tamamlasin)...");
+    Sleep(3000);
+    info("Inject ediliyor...");
+    if (!InjectIntoProcess(pi.hProcess, pi.dwProcessId, cfg::PatcherDll().c_str())) {
+        err("Inject basarisiz");
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return 1;
+    }
+    info("PID %lu senin. patcher.log dosyasini izle.", pi.dwProcessId);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    return 0;
+}
+
+// launch-args <args>: Goley_.exe + patcher.dll inject + custom args.
+// Args ornek: "TrAuth NoPopup", "TrAuth foo.txt NoPopup"
+// WinMain icin a3=lpCmdLine = exe path sonrasi her sey.
+static int CmdLaunchArgs(int argc, char** argv) {
+    if (argc < 3) { err("kullanim: revival_tool launch-args \"<lpCmdLine>\""); return 1; }
+    // Tum kalan argument'lari birlestir
+    std::string combined;
+    for (int i = 2; i < argc; i++) {
+        if (i > 2) combined += " ";
+        combined += argv[i];
+    }
+    info("Args: %s", combined.c_str());
+    CmdIfeoSet();
+    return LaunchAndInject(cfg::GoleyExe().c_str(), GoleyDir().c_str(),
+                           combined.c_str());
+}
+
+// launch-launcher: Goley.exe (root launcher) + patcher.dll inject.
+// Themida unpack + NMRunParamDLL_SetParam hook'lari calistirilir. Amac:
+// launcher Goley_.exe spawn etmeden once tum (key, value) param'larini
+// patcher.log'a doken. Boylece server emulator hangi key'leri beklemesi
+// gerek bilir, ileride bizim "launch-with-fake-params" yolunu yazariz.
+static int CmdLaunchLauncher(void) {
+    // Themida'li launcher icin child re-exec'i de wrapper'a yonlendir.
+    CmdIfeoSet();
+    return LaunchAndInject(cfg::LauncherExe().c_str(), cfg::GoleyRoot().c_str());
 }
 
 // --------------------------------------------------------------------
@@ -578,17 +692,24 @@ static int CmdDumpThreads(int argc, char** argv) {
             CONTEXT ctx = {};
             ctx.ContextFlags = CONTEXT_FULL;
             if (GetThreadContext(hThr, &ctx)) {
-                DWORD stack[5] = {0,0,0,0,0};
+                DWORD stack[16] = {0};
                 SIZE_T got = 0;
                 ReadProcessMemory(hProc, (LPCVOID)(ULONG_PTR)ctx.Esp,
                                   stack, sizeof(stack), &got);
-                printf("tid=%lu EIP=%s ESP=0x%08X | %s | %s | %s\n",
+                printf("tid=%lu EIP=%s ESP=0x%08X\n",
                        te.th32ThreadID,
                        ClassifyEip(mods, ctx.Eip).c_str(),
-                       ctx.Esp,
-                       ClassifyEip(mods, stack[0]).c_str(),
-                       ClassifyEip(mods, stack[1]).c_str(),
-                       ClassifyEip(mods, stack[2]).c_str());
+                       ctx.Esp);
+                // Sadece bilinen modullere isaret eden slot'lari yaz
+                // (binlerce slot'tan gercek call-chain'i ayikla).
+                int shown = 0;
+                for (int i = 0; i < 16 && shown < 8; i++) {
+                    std::string cls = ClassifyEip(mods, stack[i]);
+                    if (cls[0] != '?') {
+                        printf("    [esp+%-3d] 0x%08X  %s\n", i * 4, stack[i], cls.c_str());
+                        shown++;
+                    }
+                }
             } else {
                 printf("tid=%lu GetThreadContext failed: %lu\n",
                        te.th32ThreadID, GetLastError());
@@ -627,6 +748,275 @@ static int CmdCleanup(void) {
 }
 
 // --------------------------------------------------------------------
+// dump-handles: target process'in tum kernel handle'larini Type+Name ile dok.
+// --------------------------------------------------------------------
+// NtQuerySystemInformation(SystemExtendedHandleInformation) tum sistemdeki
+// handle'lari verir. PID filtreler, her birini DuplicateHandle ile kendi
+// process'imize aktarir, NtQueryObject ile Type ve Name'i cikartiriz.
+// "WaitForSingleObject(handle=0x5C, ...)" gibi bir takilma noktasinda
+// 0x5C'nin gercek isimi bulmak icin kullaniyoruz.
+
+#define SystemExtendedHandleInformation 0x40
+
+typedef struct _SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX {
+    PVOID        Object;
+    ULONG_PTR    UniqueProcessId;
+    ULONG_PTR    HandleValue;
+    ULONG        GrantedAccess;
+    USHORT       CreatorBackTraceIndex;
+    USHORT       ObjectTypeIndex;
+    ULONG        HandleAttributes;
+    ULONG        Reserved;
+} SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
+
+typedef struct _SYSTEM_HANDLE_INFORMATION_EX {
+    ULONG_PTR    NumberOfHandles;
+    ULONG_PTR    Reserved;
+    SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Handles[1];
+} SYSTEM_HANDLE_INFORMATION_EX;
+
+typedef struct { USHORT Length, MaximumLength; PWSTR Buffer; } UNI_STR_local;
+typedef struct { UNI_STR_local Name; } OBJ_NAME_INFO_local;
+typedef struct { UNI_STR_local TypeName; ULONG TotalNumberOfObjects, TotalNumberOfHandles;
+                 ULONG TotalPagedPoolUsage, TotalNonPagedPoolUsage; ULONG TotalNamePoolUsage;
+                 ULONG TotalHandleTableUsage; ULONG HighWaterNumberOfObjects, HighWaterNumberOfHandles;
+                 ULONG HighWaterPagedPoolUsage, HighWaterNonPagedPoolUsage; ULONG HighWaterNamePoolUsage;
+                 ULONG HighWaterHandleTableUsage; ULONG InvalidAttributes; GENERIC_MAPPING GenericMapping;
+                 ULONG ValidAccessMask; BOOLEAN SecurityRequired, MaintainHandleCount;
+                 UCHAR TypeIndex, ReservedByte; ULONG PoolType, DefaultPagedPoolCharge, DefaultNonPagedPoolCharge;
+               } OBJ_TYPE_INFO_local;
+
+typedef LONG (NTAPI *NtQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG);
+typedef LONG (NTAPI *NtQueryObject_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+static int CmdDumpHandles(int argc, char** argv) {
+    if (argc < 3) { err("kullanim: revival_tool dump-handles <pid> [filter_handle_hex]"); return 1; }
+    DWORD pid = (DWORD)strtoul(argv[2], NULL, 0);
+    if (!pid) { err("hatali pid"); return 1; }
+    DWORD filter = (argc >= 4) ? (DWORD)strtoul(argv[3], NULL, 0) : 0;
+    WarnIfNotAdmin("DuplicateHandle ve NtQueryObject genis erisim ister");
+
+    HMODULE hNt = GetModuleHandleA("ntdll.dll");
+    auto pNtQuerySystemInfo = (NtQuerySystemInformation_t)GetProcAddress(hNt, "NtQuerySystemInformation");
+    auto pNtQueryObject     = (NtQueryObject_t)GetProcAddress(hNt, "NtQueryObject");
+    if (!pNtQuerySystemInfo || !pNtQueryObject) { err("ntdll resolution fail"); return 1; }
+
+    // Boyutu dinamik olarak ayarla
+    ULONG sz = 0x10000;
+    BYTE* buf = (BYTE*)malloc(sz);
+    LONG status;
+    while (true) {
+        ULONG ret = 0;
+        status = pNtQuerySystemInfo(SystemExtendedHandleInformation, buf, sz, &ret);
+        if (status == 0) break;
+        if (status == (LONG)0xC0000004) {  // STATUS_INFO_LENGTH_MISMATCH
+            sz *= 2;
+            buf = (BYTE*)realloc(buf, sz);
+            continue;
+        }
+        err("NtQuerySystemInformation failed: 0x%lX", status);
+        free(buf);
+        return 1;
+    }
+
+    auto hinfo = (SYSTEM_HANDLE_INFORMATION_EX*)buf;
+    HANDLE hTarget = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
+                                  FALSE, pid);
+    if (!hTarget) {
+        err("OpenProcess(%lu) failed: %lu", pid, GetLastError());
+        free(buf);
+        return 1;
+    }
+
+    info("=== PID %lu handle dump (toplam %llu sistem genelinde) ===",
+         pid, (ULONGLONG)hinfo->NumberOfHandles);
+    int matched = 0;
+    for (ULONG_PTR i = 0; i < hinfo->NumberOfHandles; i++) {
+        auto& e = hinfo->Handles[i];
+        if ((DWORD)e.UniqueProcessId != pid) continue;
+        if (filter && (DWORD)e.HandleValue != filter) continue;
+        matched++;
+
+        HANDLE dup = NULL;
+        if (!DuplicateHandle(hTarget, (HANDLE)e.HandleValue,
+                             GetCurrentProcess(), &dup,
+                             0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            printf("  h=0x%04X access=0x%X type_idx=%u  (DuplicateHandle err=%lu)\n",
+                   (unsigned)e.HandleValue, e.GrantedAccess, e.ObjectTypeIndex,
+                   GetLastError());
+            continue;
+        }
+        BYTE tinfo[1024] = {0}; ULONG retLen = 0;
+        char typeName[64] = "?", objName[256] = "<unnamed>";
+        if (pNtQueryObject(dup, 2 /*ObjectTypeInformation*/, tinfo, sizeof(tinfo), &retLen) == 0) {
+            auto* ti = (OBJ_TYPE_INFO_local*)tinfo;
+            for (int j = 0; j < (int)(ti->TypeName.Length / sizeof(wchar_t)) && j < 63; j++) {
+                wchar_t c = ti->TypeName.Buffer[j];
+                typeName[j] = (c >= 0x20 && c < 0x80) ? (char)c : '?';
+                typeName[j + 1] = 0;
+            }
+        }
+        if (pNtQueryObject(dup, 1 /*ObjectNameInformation*/, tinfo, sizeof(tinfo), &retLen) == 0) {
+            auto* ni = (OBJ_NAME_INFO_local*)tinfo;
+            if (ni->Name.Length > 0 && ni->Name.Buffer) {
+                int n = ni->Name.Length / sizeof(wchar_t);
+                if (n > 255) n = 255;
+                for (int j = 0; j < n; j++) {
+                    wchar_t c = ni->Name.Buffer[j];
+                    objName[j] = (c >= 0x20 && c < 0x80) ? (char)c : '?';
+                }
+                objName[n] = 0;
+            }
+        }
+        CloseHandle(dup);
+        printf("  h=0x%04X  type=%-12s  name='%s'\n",
+               (unsigned)e.HandleValue, typeName, objName);
+    }
+    CloseHandle(hTarget);
+    free(buf);
+    info("=== %d handle %s ===", matched, filter ? "filter ile" : "PID'de");
+    return 0;
+}
+
+// --------------------------------------------------------------------
+// peek-stack <pid> <tid> [count]
+// --------------------------------------------------------------------
+// Belirli bir TID'in ESP'sinden count adet ham dword'u doker.
+// dump-threads sadece modul-ici slot'lari ozetler; bu komut argument'lar
+// gibi sayisal degerleri (handle, timeout, flag) gormek icin gerekli.
+static int CmdPeekStack(int argc, char** argv) {
+    if (argc < 4) { err("kullanim: revival_tool peek-stack <pid> <tid> [count=16]"); return 1; }
+    DWORD pid = strtoul(argv[2], NULL, 0);
+    DWORD tid = strtoul(argv[3], NULL, 0);
+    int count = (argc >= 5) ? atoi(argv[4]) : 16;
+    if (count < 1)  count = 16;
+    if (count > 64) count = 64;
+
+    HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!hThread) { err("OpenThread(%lu) failed: %lu", tid, GetLastError()); return 1; }
+    CONTEXT ctx; ZeroMemory(&ctx, sizeof(ctx));
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!GetThreadContext(hThread, &ctx)) {
+        err("GetThreadContext: %lu", GetLastError());
+        CloseHandle(hThread); return 1;
+    }
+    CloseHandle(hThread);
+
+    HANDLE hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) { err("OpenProcess: %lu", GetLastError()); return 1; }
+
+    info("tid=%lu  EIP=0x%08X  ESP=0x%08X  EBP=0x%08X",
+         tid, ctx.Eip, ctx.Esp, ctx.Ebp);
+    info("EAX=0x%08X  EBX=0x%08X  ECX=0x%08X  EDX=0x%08X",
+         ctx.Eax, ctx.Ebx, ctx.Ecx, ctx.Edx);
+    info("ESI=0x%08X  EDI=0x%08X",
+         ctx.Esi, ctx.Edi);
+    DWORD slot = 0; SIZE_T got = 0;
+    for (int i = 0; i < count; i++) {
+        DWORD_PTR addr = (DWORD_PTR)ctx.Esp + (DWORD_PTR)i * 4;
+        if (!ReadProcessMemory(hProc, (LPCVOID)addr, &slot, sizeof(slot), &got) || got != 4) {
+            printf("  [esp+%-3d] (read failed)\n", i*4);
+            break;
+        }
+        printf("  [esp+%-3d] 0x%08X  (%lu)\n", i*4, slot, (unsigned long)slot);
+    }
+    CloseHandle(hProc);
+    return 0;
+}
+
+// --------------------------------------------------------------------
+// walk-frames <pid> <tid> [max_depth]
+// --------------------------------------------------------------------
+// EBP frame chain'i takip et. Stack layout (gcc/msvc ABI):
+//   [EBP+0]  = saved EBP   (onceki frame)
+//   [EBP+4]  = return addr (caller'in instruction'i)
+// Her frame'de modul classification yap (modul listesini al + RVA hesapla).
+// Hot-spot: kontrol akisini geri tarayarak GERCEK caller chain'i cikar.
+static int CmdWalkFrames(int argc, char** argv) {
+    if (argc < 4) { err("kullanim: revival_tool walk-frames <pid> <tid> [max_depth=20]"); return 1; }
+    DWORD pid = strtoul(argv[2], NULL, 0);
+    DWORD tid = strtoul(argv[3], NULL, 0);
+    int maxDepth = (argc >= 5) ? atoi(argv[4]) : 20;
+    if (maxDepth < 1)  maxDepth = 20;
+    if (maxDepth > 64) maxDepth = 64;
+
+    HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!hThread) { err("OpenThread: %lu", GetLastError()); return 1; }
+    CONTEXT ctx; ZeroMemory(&ctx, sizeof(ctx));
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!GetThreadContext(hThread, &ctx)) { err("GetThreadContext: %lu", GetLastError()); CloseHandle(hThread); return 1; }
+    CloseHandle(hThread);
+
+    HANDLE hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) { err("OpenProcess: %lu", GetLastError()); return 1; }
+    std::vector<ModuleRange> mods = SnapshotModules(hProc);
+
+    info("tid=%lu  EIP=%s  ESP=0x%08X  EBP=0x%08X",
+         tid, ClassifyEip(mods, ctx.Eip).c_str(), ctx.Esp, ctx.Ebp);
+
+    DWORD ebp = ctx.Ebp;
+    for (int depth = 0; depth < maxDepth; depth++) {
+        if (ebp == 0 || ebp == 0xFFFFFFFF) { puts("  [frame chain end (ebp=0)]"); break; }
+        DWORD savedEbp = 0, retAddr = 0;
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(hProc, (LPCVOID)(DWORD_PTR)ebp, &savedEbp, sizeof(savedEbp), &got) || got != 4) {
+            printf("  #%d ebp=0x%08X  (read failed at [ebp])\n", depth, ebp);
+            break;
+        }
+        if (!ReadProcessMemory(hProc, (LPCVOID)(DWORD_PTR)(ebp + 4), &retAddr, sizeof(retAddr), &got) || got != 4) {
+            printf("  #%d ebp=0x%08X  (read failed at [ebp+4])\n", depth, ebp);
+            break;
+        }
+        printf("  #%-2d ebp=0x%08X  ret=%s\n",
+               depth, ebp, ClassifyEip(mods, retAddr).c_str());
+        if (savedEbp <= ebp || savedEbp - ebp > 0x100000) {
+            puts("  [chain looks broken (savedEbp invalid)]");
+            break;
+        }
+        ebp = savedEbp;
+    }
+    CloseHandle(hProc);
+    return 0;
+}
+
+// --------------------------------------------------------------------
+// read-mem <pid> <hex_addr> [count]
+// --------------------------------------------------------------------
+// PID'in adres uzayinda hex+ASCII dump. MCP bagimsiz disassemble-onu
+// hazirlik (ham bytes'i baska arac ile cozeriz).
+static int CmdReadMem(int argc, char** argv) {
+    if (argc < 4) { err("kullanim: revival_tool read-mem <pid> <hex_addr> [count=64]"); return 1; }
+    DWORD pid = strtoul(argv[2], NULL, 0);
+    DWORD_PTR addr = (DWORD_PTR)strtoull(argv[3], NULL, 0);
+    int count = (argc >= 5) ? atoi(argv[4]) : 64;
+    if (count < 1)    count = 64;
+    if (count > 4096) count = 4096;
+    HANDLE hProc = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) { err("OpenProcess: %lu", GetLastError()); return 1; }
+    BYTE* buf = (BYTE*)malloc(count);
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(hProc, (LPCVOID)addr, buf, count, &got)) {
+        err("ReadProcessMemory: %lu", GetLastError());
+        free(buf); CloseHandle(hProc); return 1;
+    }
+    for (SIZE_T i = 0; i < got; i += 16) {
+        printf("%08X  ", (unsigned)(addr + i));
+        for (SIZE_T j = 0; j < 16; j++) {
+            if (i + j < got) printf("%02X ", buf[i + j]);
+            else             printf("   ");
+        }
+        printf(" |");
+        for (SIZE_T j = 0; j < 16 && i + j < got; j++) {
+            BYTE c = buf[i + j];
+            putchar((c >= 0x20 && c < 0x7F) ? c : '.');
+        }
+        printf("|\n");
+    }
+    free(buf); CloseHandle(hProc);
+    return 0;
+}
+
+// --------------------------------------------------------------------
 // help + dispatch
 // --------------------------------------------------------------------
 static int CmdHelp(void) {
@@ -636,11 +1026,17 @@ static int CmdHelp(void) {
     puts("  init <setup.exe>     Joygame setup'ini calistir, IFEO'yu ayarla, tool'u hazirla");
     puts("  launch               Goley_.exe baslat + patcher.dll inject + Resume");
     puts("  launch-unpacked      unpacked_Goley_PATCHED.exe'yi calistir (Themida yok)");
+    puts("  launch-launcher      Goley.exe (launcher) baslat + patcher.dll inject (NMRunParam SetParam hook)");
+    puts("  launch-args <args>   Goley_.exe baslat <args> ile (orn: \"TrAuth NoPopup\")");
     puts("  extract [vlh] [vld]  sifreli VLH/VLD oyun dosyalarini ac (argsiz = data klasoru)");
     puts("  patch <in> <out>     unpacked binary'e patches.json'u uygula (IDA gerek yok)");
     puts("  unpack <pid> [out]   calisan Goley_'in unpacked PE memory'sini diske yaz");
     puts("  inject <pid>         calisan PID'ye patcher.dll inject et");
     puts("  dump-threads <pid>   her thread'in EIP/return-addr'sini cikar");
+    puts("  dump-handles <pid> [hex_handle]  PID'deki tum handle'lari Type+Name ile dok");
+    puts("  peek-stack <pid> <tid> [count]  TID'in ESP'sinden ham dword'leri dok");
+    puts("  read-mem <pid> <hex_addr> [count]  PID adres uzayindan hex+ASCII dump");
+    puts("  walk-frames <pid> <tid> [depth]  EBP frame chain'i caller chain ile dok");
     puts("  ifeo set             revival_wrapper'i IFEO Debugger olarak ayarla");
     puts("  ifeo clear           IFEO Debugger kaydini kaldir");
     puts("  ifeo show            mevcut IFEO Debugger degerini yaz");
@@ -666,11 +1062,17 @@ int main(int argc, char** argv) {
     if (!strcmp(cmd, "init"))             return CmdInit(argc, argv);
     if (!strcmp(cmd, "launch"))           return CmdLaunch();
     if (!strcmp(cmd, "launch-unpacked"))  return CmdLaunchUnpacked();
+    if (!strcmp(cmd, "launch-launcher"))  return CmdLaunchLauncher();
+    if (!strcmp(cmd, "launch-args"))      return CmdLaunchArgs(argc, argv);
     if (!strcmp(cmd, "patch"))            return CmdPatch(argc, argv);
     if (!strcmp(cmd, "extract"))          return CmdExtract(argc, argv);
     if (!strcmp(cmd, "unpack"))           return CmdUnpack(argc, argv);
     if (!strcmp(cmd, "inject"))           return CmdInject(argc, argv);
     if (!strcmp(cmd, "dump-threads"))     return CmdDumpThreads(argc, argv);
+    if (!strcmp(cmd, "dump-handles"))     return CmdDumpHandles(argc, argv);
+    if (!strcmp(cmd, "peek-stack"))       return CmdPeekStack(argc, argv);
+    if (!strcmp(cmd, "read-mem"))         return CmdReadMem(argc, argv);
+    if (!strcmp(cmd, "walk-frames"))      return CmdWalkFrames(argc, argv);
     if (!strcmp(cmd, "cleanup"))          return CmdCleanup();
     if (!strcmp(cmd, "ifeo")) {
         if (argc < 3) { err("kullanim: revival_tool ifeo set|clear|show"); return 1; }
