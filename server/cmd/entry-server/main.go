@@ -13,12 +13,19 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/uintptr/goley-server/cmd/database"
 	"github.com/uintptr/goley-server/internal/proudnet"
 )
 
 const defaultAddr = "0.0.0.0:2270"
 
+var (
+	db *database.Database
+)
+
 func main() {
+	db := database.ConnectDatabase()
+	db.CheckTables()
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(log)
 
@@ -41,6 +48,25 @@ func main() {
 }
 
 func registerHandlers(s *proudnet.Server, log *slog.Logger) {
+	// Hand maded register handler
+	// TODO Implement client side and test this request
+	s.Handle(proudnet.EntryC2S_RequestCreateNewGamer, func(c *proudnet.Conn, body *proudnet.Message) error {
+		gamerID, err := body.ReadString()
+		if err != nil {
+			return err
+		}
+		password, _ := body.ReadString()
+		log.Info("RequestRegister", " id: ", gamerID, " pw_len: ", len(password))
+
+		err = db.RegisterUser(gamerID, password)
+		if err != nil {
+			log.Error("Player: ", gamerID, " database register error.")
+			resp := proudnet.NewMessage()
+			return c.Send(proudnet.EntryS2C_NotifyCreateNewGamerFailed, resp)
+		}
+		resp := proudnet.NewMessage()
+		return c.Send(proudnet.EntryS2C_NotifyCreateNewGamerSuccess, resp)
+	})
 	// Goley-specific: RequestLogin (Goley uses this, not RequestFirstLogon)
 	s.Handle(proudnet.EntryC2S_RequestLogin, func(c *proudnet.Conn, body *proudnet.Message) error {
 		gamerID, err := body.ReadString()
@@ -49,8 +75,14 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		}
 		password, _ := body.ReadString()
 		log.Info("RequestLogin", "id", gamerID, "pw_len", len(password))
-
 		// NotifyLoginOk (Goley) -- gamerGuid + credential
+		// TODO Create a user struct after this for sanity checks like for EntryC2S_RequestHeroSlots etc. requests
+		_, err = db.GetUser(gamerID, password)
+		if err != nil {
+			log.Info("RequestLogin", "id", gamerID, "pw_len", len(password))
+			resp := proudnet.NewMessage()
+			return c.Send(proudnet.EntryS2C_NotifyLoginFailed, resp)
+		}
 		resp := proudnet.NewMessage()
 		resp.WriteBytes(makeFakeGuid(gamerID))
 		resp.WriteBytes(makeFakeGuid("cred_" + gamerID))
