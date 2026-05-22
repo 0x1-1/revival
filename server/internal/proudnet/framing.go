@@ -21,17 +21,27 @@ import (
 )
 
 // MessageType -- internal message-class tag (first byte of each frame).
-// Values are guesses based on ProudNet header comments; live capture required.
+//
+// Values were cross-checked against Nettention's public ProudNet WebGL bridge
+// (`WebGL_ProudNet_*.jslib`). Native TCP framing is still not fully verified,
+// but these inner message IDs are no longer guesses.
 type MessageType byte
 
 const (
-	MessageTypeRMI       MessageType = 0x01 // typical RMI call
-	MessageTypeUserMsg   MessageType = 0x02 // SendUserMessage path
-	MessageTypeRequestServerTime MessageType = 0x10
-	MessageTypeServerHolepunch   MessageType = 0x20
-	MessageTypePeerToPeer        MessageType = 0x30
-	MessageTypeConnectServerTimedout MessageType = 0xFE
-	MessageTypeNotifyServerConnectionHint MessageType = 0xFF
+	MessageTypeRMI                             MessageType = 0x01
+	MessageTypeUserMsg                         MessageType = 0x02
+	MessageTypeConnectServerTimedout           MessageType = 0x04
+	MessageTypeNotifyStartupEnvironment        MessageType = 0x05
+	MessageTypeRequestServerConnection         MessageType = 0x06
+	MessageTypeNotifyProtocolVersionMismatch   MessageType = 0x0B
+	MessageTypeNotifyServerDeniedConnection    MessageType = 0x0C
+	MessageTypeNotifyServerConnectSuccess      MessageType = 0x0D
+	MessageTypeReliableRelay1                  MessageType = 0x1A
+	MessageTypeUnreliableRelay1                MessageType = 0x1B
+	MessageTypeReliableRelay2                  MessageType = 0x1E
+	MessageTypeUnreliableRelay2                MessageType = 0x1F
+	MessageTypePolicyRequest                   MessageType = 0x36
+	MessageTypeNotifyLicenseMismatch           MessageType = 0x39
 )
 
 // Frame represents a parsed inbound message.

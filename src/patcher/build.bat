@@ -2,11 +2,13 @@
 REM Build revival_patcher.dll (32-bit, Goley_.exe matches)
 REM Requires Visual Studio 2022 Build Tools
 
-set VS_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community
-set VC_VARS=%VS_PATH%\VC\Auxiliary\Build\vcvars32.bat
+set "VC_VARS="
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat" set "VC_VARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat"
+if not defined VC_VARS if exist "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat" set "VC_VARS=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat"
+if not defined VC_VARS if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat" set "VC_VARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat"
 
 if not exist "%VC_VARS%" (
-    echo ERROR: vcvars32.bat not found at %VC_VARS%
+    echo ERROR: vcvars32.bat not found. Install VS 2022 Build Tools MSVC v143 x86 x64.
     exit /b 1
 )
 

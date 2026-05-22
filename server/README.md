@@ -117,10 +117,10 @@ sahibinin malıdır.
 
 `internal/proudnet/` içinde:
 
-* `framing.go`: TCP framing (uzunluk-önek + RMI ID). Client TCP
-  bağlanır bağlanmaz bir handshake yapıyor: magic byte'lar + version
-  + magic IV. Bizim implementasyon bu handshake'i tamamlayıp RMI
-  layer'ına geçiyor.
+* `framing.go`: TCP framing (uzunluk-önek + RMI ID). Bu katman hâlâ
+  scaffold durumunda; gerçek byte layout ve handshake client canlı TCP
+  aşamasına ulaşınca doğrulanacak. Güncel statik bulgular için
+  `C:\Joygame\goley-rev\notes\faz15-rmi-static.md`.
 * `message.go`: PIDL serializer/deserializer. Goley'in kullandığı
   primitive tipleri (string, int32, GUID, bytes) okuyup yazıyor.
 * `rmi_ids.go`: tüm RMI method ID'lerinin listesi. CasualGame2
@@ -175,8 +175,8 @@ Daha detay için `docs/protocol-notes.md`.
 
 | Bileşen | Durum |
 |---|---|
-| ProudNet TCP handshake | Implement, mock client ile doğrulandı |
-| RMI dispatch | İskelet, ana metodlar var |
+| ProudNet TCP handshake | Scaffold; gerçek client ile henüz doğrulanmadı |
+| RMI dispatch | İskelet; `RequestLogin=0x259`, `NotifyLoginOk=0x28b`, `NotifyLoginFailed=0x28c` statik doğrulandı |
 | Entry server (login) | Stub: her login başarılı |
 | Lobby server | İskelet, oda listesi sabit |
 | Battle server | İskelet, UDP relay var |

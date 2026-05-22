@@ -55,9 +55,16 @@ const (
 )
 
 // =============================================================================
-// Goley RMI ID base values (educated guess -- verify against binary RMI symbols).
-// These mirror the CasualGame2 sample bases. Goley specific values to be confirmed
-// from a captured handshake / disassembled RTTI / actual packet trace.
+// Goley RMI ID base values for legacy/sample flows.
+//
+// Goley also contains a smaller generated "VizC2S/VizS2C" ProudNet interface.
+// Static recon in C:\Joygame\goley-rev\out\rmi_static_recon.txt confirms the
+// login RMI IDs below:
+//   RequestLogin      = 0x259 / 601
+//   NotifyLoginOk     = 0x28b / 651
+//   NotifyLoginFailed = 0x28c / 652
+// The CasualGame2-style bases are kept for older scaffold handlers, but do not
+// use them for the confirmed Goley login path.
 // =============================================================================
 
 const (
@@ -89,9 +96,9 @@ const (
 	EntryC2S_RequestRemoveHero     = EntryC2SBase + 7
 	EntryC2S_RequestLobbyList      = EntryC2SBase + 8
 
-	// Goley-specific (extracted from BinaryTr unpacked memory)
-	EntryC2S_RequestLogin         = EntryC2SBase + 10
-	EntryC2S_RequestBigCardInfo   = EntryC2SBase + 11
+	// Goley-specific VizC2S (confirmed from BinaryTr generated ProudNet proxy)
+	EntryC2S_RequestLogin       = 0x259
+	EntryC2S_RequestBigCardInfo = EntryC2SBase + 11
 )
 
 const (
@@ -118,10 +125,13 @@ const (
 	EntryS2C_LobbyList_Add               = EntryS2CBase + 21
 	EntryS2C_LobbyList_End               = EntryS2CBase + 22
 
-	// Goley-specific (extracted from BinaryTr unpacked memory)
-	EntryS2C_NotifyLoginOk     = EntryS2CBase + 30
-	EntryS2C_NotifyLoginFailed = EntryS2CBase + 31
-	EntryS2C_GotoLobby         = EntryS2CBase + 32
+	// Goley-specific VizS2C (confirmed from BinaryTr generated ProudNet stub)
+	EntryS2C_NotifyLoginOk     = 0x28b
+	EntryS2C_NotifyLoginFailed = 0x28c
+
+	// Not confirmed as a ProudNet RMI. The "GotoLobby" string found at
+	// 0x00f94c70 is an ASCII UI/script event dispatcher string.
+	EntryS2C_GotoLobby = EntryS2CBase + 32
 )
 
 const (

@@ -23,6 +23,7 @@
 
 # Logs / debug output
 *.log
+*.log.*.bak
 patcher.log
 wrapper.log
 thread_dump.log
