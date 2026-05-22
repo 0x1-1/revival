@@ -13,12 +13,22 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/uintptr/goley-server/cmd/database"
 	"github.com/uintptr/goley-server/internal/proudnet"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const defaultAddr = "0.0.0.0:2270"
 
+var (
+	db *database.Database
+)
+
 func main() {
+	db := database.ConnectDatabase()
+	db.CheckTables()
+	// db.RegisterUser("ahmet", "mehmet")
+	db.GetUser("ahmet", "mehmet")
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(log)
 
@@ -41,6 +51,32 @@ func main() {
 }
 
 func registerHandlers(s *proudnet.Server, log *slog.Logger) {
+	// Hand maded register handler
+	// TODO Implement client side and test this request
+	s.Handle(proudnet.EntryC2S_RequestCreateNewGamer, func(c *proudnet.Conn, body *proudnet.Message) error {
+		gamerID, err := body.ReadString()
+		if err != nil {
+			return err
+		}
+		password, _ := body.ReadString()
+		log.Info("RequestRegister", " id: ", gamerID, " pw_len: ", len(password))
+
+		//10 default hash cost
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), 10)
+		if err != nil {
+			log.Error("Player: ", gamerID, " register error: Password hash.")
+			resp := proudnet.NewMessage()
+			return c.Send(proudnet.EntryS2C_NotifyCreateNewGamerFailed, resp)
+		}
+		err = db.RegisterUser(gamerID, string(hash))
+		if err != nil {
+			log.Error("Player: ", gamerID, " database register error.")
+			resp := proudnet.NewMessage()
+			return c.Send(proudnet.EntryS2C_NotifyCreateNewGamerFailed, resp)
+		}
+		resp := proudnet.NewMessage()
+		return c.Send(proudnet.EntryS2C_NotifyCreateNewGamerSuccess, resp)
+	})
 	// Goley-specific: RequestLogin (Goley uses this, not RequestFirstLogon)
 	s.Handle(proudnet.EntryC2S_RequestLogin, func(c *proudnet.Conn, body *proudnet.Message) error {
 		gamerID, err := body.ReadString()
@@ -49,8 +85,8 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		}
 		password, _ := body.ReadString()
 		log.Info("RequestLogin", "id", gamerID, "pw_len", len(password))
-
 		// NotifyLoginOk (Goley) -- gamerGuid + credential
+
 		resp := proudnet.NewMessage()
 		resp.WriteBytes(makeFakeGuid(gamerID))
 		resp.WriteBytes(makeFakeGuid("cred_" + gamerID))
