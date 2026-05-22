@@ -94,20 +94,6 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		// HeroList_End
 		return c.Send(proudnet.EntryS2C_HeroList_End, proudnet.NewMessage())
 	})
-
-	// EntryC2S.RequestLobbyList -- return one lobby pointing at 127.0.0.1:2271
-	s.Handle(proudnet.EntryC2S_RequestLobbyList, func(c *proudnet.Conn, body *proudnet.Message) error {
-		c.Send(proudnet.EntryS2C_LobbyList_Begin, proudnet.NewMessage())
-		add := proudnet.NewMessage()
-		// LobbyList_Add([in] CStringW lobbyName, [in] NamedAddrPort serverAddr, [in] int gamerCount)
-		add.WriteString("Goley Lobby")
-		// NamedAddrPort serialization: name + addr + port (placeholder).
-		add.WriteString("127.0.0.1")
-		add.WriteInt32(2271)
-		add.WriteInt32(0) // gamerCount
-		c.Send(proudnet.EntryS2C_LobbyList_Add, add)
-		return c.Send(proudnet.EntryS2C_LobbyList_End, proudnet.NewMessage())
-	})
 }
 
 // makeFakeGuid returns a 16-byte deterministic GUID-shaped identifier built

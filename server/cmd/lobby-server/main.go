@@ -1,10 +1,11 @@
 // Lobby server -- between login and battle.
 //
 // Goley flow:
-//   Entry server validates credentials → returns lobby endpoint
-//   Client connects to lobby → RequestNextLogon(credential)
-//   Lobby publishes game rooms, chat, friend list
-//   Client creates/joins room → server returns battle endpoint + new credential
+//
+//	Entry server validates credentials → returns lobby endpoint
+//	Client connects to lobby → RequestNextLogon(credential)
+//	Lobby publishes game rooms, chat, friend list
+//	Client creates/joins room → server returns battle endpoint + new credential
 package main
 
 import (
@@ -14,12 +15,22 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/uintptr/goley-server/cmd/types"
 	"github.com/uintptr/goley-server/internal/proudnet"
 )
 
 const defaultAddr = "0.0.0.0:2271"
 
+type Lobies struct {
+	lobbies map[string]types.Lobby
+}
+
+var (
+	lobbyMap = Lobies{make(map[string]types.Lobby)}
+)
+
 func main() {
+
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(log)
 
@@ -54,7 +65,7 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		// CHeroPublishInfo is a custom struct -- placeholder for now.
 		resp := proudnet.NewMessage()
 		resp.WriteBytes(make([]byte, 16)) // GamerGuid
-		resp.WriteString("Goley")          // hero name (stand-in for full CHeroPublishInfo)
+		resp.WriteString("Goley")         // hero name (stand-in for full CHeroPublishInfo)
 		return c.Send(proudnet.LobbyS2C_NotifyNextLogonSuccess, resp)
 	})
 
@@ -79,10 +90,52 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 	s.Handle(proudnet.LobbyC2S_RequestCreateGameRoom, func(c *proudnet.Conn, body *proudnet.Message) error {
 		log.Info("create room request", "hostID", c.HostID)
 		// CGameRoomParameter is custom -- placeholder
+		lobbyName, err := body.ReadString()
+		if err != nil {
+			log.Error("Lobby name error!")
+		}
+		lobbyMap.lobbies[lobbyName] = types.Lobby{LobbyIP: string(c.HostID), LobbyPort: 2272, LobbyName: lobbyName, IsGameFull: false, IsMatchStarted: false}
 		resp := proudnet.NewMessage()
-		resp.WriteString("Room 1")    // room name
-		resp.WriteString("127.0.0.1") // battle server
-		resp.WriteInt32(2272)         // port
+		resp.WriteString(lobbyName)        // room name
+		resp.WriteString(string(c.HostID)) // battle server
+		resp.WriteInt32(2272)              // port
 		return c.Send(proudnet.LobbyS2C_NotifyCreateRoomSuccess, resp)
+	})
+
+	// EntryC2S.RequestLobbyList -- return one lobby pointing at 127.0.0.1:2271
+	s.Handle(proudnet.EntryC2S_RequestLobbyList, func(c *proudnet.Conn, body *proudnet.Message) error {
+		c.Send(proudnet.EntryS2C_LobbyList_Begin, proudnet.NewMessage())
+		res := proudnet.NewMessage()
+		// LobbyList_Add([in] CStringW lobbyName, [in] NamedAddrPort serverAddr, [in] int gamerCount)
+		// TODO test multiple lobbies
+		for _, lobby := range lobbyMap.lobbies {
+			res.WriteString(lobby.LobbyName)
+			res.WriteString(lobby.LobbyIP)
+			res.WriteInt32(lobby.LobbyPort)
+			res.WriteInt32(lobby.GamerCount)
+		}
+		c.Send(proudnet.EntryS2C_LobbyList_Add, res)
+		return c.Send(proudnet.EntryS2C_LobbyList_End, proudnet.NewMessage())
+	})
+
+	s.Handle(proudnet.LobbyC2S_RequestJoinGameRoom, func(c *proudnet.Conn, body *proudnet.Message) error {
+		log.Info("join room request", "hostID", c.HostID)
+		// CGameRoomParameter is custom -- placeholder
+		lobbyName, err := body.ReadString()
+		if err != nil {
+			log.Error("Join request error")
+		}
+
+		if lobby, ok := lobbyMap.lobbies[lobbyName]; ok {
+			if lobby.GamerCount < 2 && !lobby.IsMatchStarted {
+				res := proudnet.NewMessage()
+				res.WriteString(lobby.LobbyName)
+				res.WriteString(lobby.LobbyIP)
+				res.WriteInt32(lobby.LobbyPort)
+				return c.Send(proudnet.LobbyS2C_NotifyJoinRoomSuccess, res)
+			}
+		}
+		res := proudnet.NewMessage()
+		return c.Send(proudnet.LobbyS2C_NotifyJoinRoomFailed, res)
 	})
 }
