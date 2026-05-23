@@ -1,17 +1,17 @@
 // TCP packet framing for ProudNet.
 //
-// ProudNet wraps each logical RMI message in a frame. The exact framing format
-// observed in network captures follows this pattern (based on ProudNet sample
-// code analysis, to be verified against a live capture):
+// Goley's TCP stream wraps each logical ProudNet payload as:
 //
-//   [ MessageType: 1 byte ] [ HostID dest: int32 (compact) ] [ RMI ID: int32 (compact) ]
-//   [ Encrypted body... ]
+//	[0x32 marker] [uint16 LE payloadLen] [1B msgType] [payloadLen bytes payload]
 //
-// The TCP stream has its own outer framing too -- typically a length-prefixed
-// chunk per IO event. ProudNet uses a "Final User Work Item" boundary marker.
+// This was confirmed from live Goley captures:
 //
-// THIS FILE IS A SCAFFOLD. The exact byte layout will be refined once we capture
-// a real handshake from the Goley client.
+//	hello        32 18 00 00 + 24B core payload
+//	RequestLogin 32 0a 01 01 + 266B RMI payload
+//
+// The inner RMI payload still carries the ProudNet RMI header:
+//
+//	[HostID dest] [RMI ID] [encoded args...]
 package proudnet
 
 import (
@@ -28,20 +28,22 @@ import (
 type MessageType byte
 
 const (
-	MessageTypeRMI                             MessageType = 0x01
-	MessageTypeUserMsg                         MessageType = 0x02
-	MessageTypeConnectServerTimedout           MessageType = 0x04
-	MessageTypeNotifyStartupEnvironment        MessageType = 0x05
-	MessageTypeRequestServerConnection         MessageType = 0x06
-	MessageTypeNotifyProtocolVersionMismatch   MessageType = 0x0B
-	MessageTypeNotifyServerDeniedConnection    MessageType = 0x0C
-	MessageTypeNotifyServerConnectSuccess      MessageType = 0x0D
-	MessageTypeReliableRelay1                  MessageType = 0x1A
-	MessageTypeUnreliableRelay1                MessageType = 0x1B
-	MessageTypeReliableRelay2                  MessageType = 0x1E
-	MessageTypeUnreliableRelay2                MessageType = 0x1F
-	MessageTypePolicyRequest                   MessageType = 0x36
-	MessageTypeNotifyLicenseMismatch           MessageType = 0x39
+	frameMarker byte = 0x32
+
+	MessageTypeRMI                           MessageType = 0x01
+	MessageTypeUserMsg                       MessageType = 0x02
+	MessageTypeConnectServerTimedout         MessageType = 0x04
+	MessageTypeNotifyStartupEnvironment      MessageType = 0x05
+	MessageTypeRequestServerConnection       MessageType = 0x06
+	MessageTypeNotifyProtocolVersionMismatch MessageType = 0x0B
+	MessageTypeNotifyServerDeniedConnection  MessageType = 0x0C
+	MessageTypeNotifyServerConnectSuccess    MessageType = 0x0D
+	MessageTypeReliableRelay1                MessageType = 0x1A
+	MessageTypeUnreliableRelay1              MessageType = 0x1B
+	MessageTypeReliableRelay2                MessageType = 0x1E
+	MessageTypeUnreliableRelay2              MessageType = 0x1F
+	MessageTypePolicyRequest                 MessageType = 0x36
+	MessageTypeNotifyLicenseMismatch         MessageType = 0x39
 )
 
 // Frame represents a parsed inbound message.
@@ -52,47 +54,38 @@ type Frame struct {
 	Body    []byte
 }
 
-// ReadFrame reads a single framed message from the connection. Assumes the
-// outer length prefix is a uint16 little-endian (placeholder -- verify).
-//
-// NOTE: This is a *guess* at the wire format. We will revise after capturing
-// a real Goley handshake.
+// ReadFrame reads a single Goley/ProudNet framed message from the connection.
 func ReadFrame(r io.Reader) (*Frame, error) {
-	var lenBuf [2]byte
-	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
-	frameLen := binary.LittleEndian.Uint16(lenBuf[:])
-	if frameLen == 0 {
-		return nil, errors.New("proudnet: zero-length frame")
+	if hdr[0] != frameMarker {
+		return nil, errors.New("proudnet: bad frame marker")
 	}
+	frameLen := binary.LittleEndian.Uint16(hdr[1:3])
 	body := make([]byte, frameLen)
 	if _, err := io.ReadFull(r, body); err != nil {
 		return nil, err
 	}
-	if len(body) < 1 {
-		return nil, errors.New("proudnet: frame too short for header")
-	}
 
 	f := &Frame{
-		MsgType: MessageType(body[0]),
-		Body:    body[1:],
+		MsgType: MessageType(hdr[3]),
+		Body:    body,
 	}
 	return f, nil
 }
 
 // WriteFrame sends a framed message.
 func WriteFrame(w io.Writer, mt MessageType, body []byte) error {
-	payload := make([]byte, 1+len(body))
-	payload[0] = byte(mt)
-	copy(payload[1:], body)
-
-	var lenBuf [2]byte
-	binary.LittleEndian.PutUint16(lenBuf[:], uint16(len(payload)))
-	if _, err := w.Write(lenBuf[:]); err != nil {
+	var hdr [4]byte
+	hdr[0] = frameMarker
+	binary.LittleEndian.PutUint16(hdr[1:3], uint16(len(body)))
+	hdr[3] = byte(mt)
+	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(payload)
+	_, err := w.Write(body)
 	return err
 }
 

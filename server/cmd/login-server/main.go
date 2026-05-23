@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/uintptr/goley-server/internal/common"
+	"github.com/uintptr/goley-server/internal/proudnet"
 )
 
 func main() {
@@ -34,7 +36,7 @@ func main() {
 	loginPort := flag.Int("login-port", 0, "legacy single login/auth port; appended when non-zero")
 	gamePort := flag.Int("game-port", 0, "legacy single game/world port; appended when non-zero")
 	host := flag.String("host", "0.0.0.0", "bind host")
-	probe := flag.String("probe", "", "optional TCP8000 probe response: startup-raw,startup-len16le,startup-len16be,startup-len32le,startup-len32be,startup-pn32,success-pn32-afterread,success-pn32le-afterread,startup-success-pn32")
+	probe := flag.String("probe", "", "optional TCP8000 probe response: startup-raw,startup-len16le,startup-len16be,startup-len32le,startup-len32be,startup-pn32,success-pn32-afterread,success-pn32le-afterread,startup-success-pn32,loginok-opcode-afterread,loginok-rmi32-afterread")
 	flag.Parse()
 
 	log := common.NewLogger("login-server")
@@ -153,6 +155,7 @@ func handle(conn net.Conn, label string, probe string, log *common.Logger) {
 		copy(data, buf[:totalRead])
 		log.Logf("[%s] %s captured %d bytes (%s):\n%s", label, remote, totalRead, reason, common.HexDump(data, 1024))
 		saveCapture(label, remote, data, log)
+		logDecodedFrames(label, remote, data, log)
 		totalRead = 0
 	}
 	for {
@@ -160,7 +163,7 @@ func handle(conn net.Conn, label string, probe string, log *common.Logger) {
 		if n > 0 {
 			totalRead += n
 			if label == "TCP8000" {
-				if payload, ok := buildAfterReadProbe(probe); ok {
+				if payload, ok := buildAfterReadProbe(probe, buf[:totalRead]); ok {
 					if wn, werr := conn.Write(payload); werr != nil {
 						log.Logf("[%s] %s after-read probe %s write err after %d/%d bytes: %v", label, remote, probe, wn, len(payload), werr)
 					} else {
@@ -211,6 +214,28 @@ func handle(conn net.Conn, label string, probe string, log *common.Logger) {
 	// For now we just close -- packet logger only.
 }
 
+func logDecodedFrames(label, remote string, data []byte, log *common.Logger) {
+	r := bytes.NewReader(data)
+	frameIdx := 0
+	for r.Len() > 0 {
+		f, err := proudnet.ReadFrame(r)
+		if err != nil {
+			log.Logf("[%s] %s decode frame[%d] err: %v", label, remote, frameIdx, err)
+			return
+		}
+		channel := byte(f.MsgType)
+		plain, err := proudnet.DecodeCodecFrameBody(channel, f.Body)
+		if err != nil {
+			log.Logf("[%s] %s frame[%d] ch=%d body=%d codec decode err: %v", label, remote, frameIdx, channel, len(f.Body), err)
+			frameIdx++
+			continue
+		}
+		log.Logf("[%s] %s frame[%d] ch=%d body=%d decoded=%d:\n%s",
+			label, remote, frameIdx, channel, len(f.Body), len(plain), common.HexDump(plain, 512))
+		frameIdx++
+	}
+}
+
 func buildProbe(mode string) ([]byte, bool) {
 	startup := buildNotifyStartupEnvironment()
 	switch mode {
@@ -253,15 +278,34 @@ func buildProbe(mode string) ([]byte, bool) {
 	}
 }
 
-func buildAfterReadProbe(mode string) ([]byte, bool) {
+func buildAfterReadProbe(mode string, observed []byte) ([]byte, bool) {
 	switch mode {
 	case "success-pn32-afterread", "startup-success-pn32":
 		return wrapPN32(buildNotifyServerConnectSuccess(false)), true
 	case "success-pn32le-afterread":
 		return wrapPN32(buildNotifyServerConnectSuccess(true)), true
+	case "loginok-opcode-afterread":
+		if !containsDecodedRequestLogin(observed) {
+			return nil, false
+		}
+		return buildNotifyLoginOkOpcodeProbe(), true
+	case "loginok-rmi32-afterread":
+		if !containsDecodedRequestLogin(observed) {
+			return nil, false
+		}
+		return buildNotifyLoginOkRMI32Probe(), true
 	default:
 		return nil, false
 	}
+}
+
+func wrapPN32Channel(channel byte, payload []byte) []byte {
+	out := make([]byte, 4, len(payload)+4)
+	out[0] = 0x32
+	binary.LittleEndian.PutUint16(out[1:3], uint16(len(payload)))
+	out[3] = channel
+	out = append(out, payload...)
+	return out
 }
 
 func wrapPN32(payload []byte) []byte {
@@ -271,6 +315,74 @@ func wrapPN32(payload []byte) []byte {
 	out[3] = 0
 	out = append(out, payload...)
 	return out
+}
+
+func buildNotifyLoginOkOpcodeProbe() []byte {
+	plain := make([]byte, 0, 64)
+	var op [2]byte
+	binary.LittleEndian.PutUint16(op[:], uint16(proudnet.EntryS2C_NotifyLoginOk))
+	plain = append(plain, op[:]...)
+
+	// NotifyLoginOk statically looks like gamerGuid + credential. The exact
+	// serializer is still being mapped, so this is a reachability probe for the
+	// inbound login dispatcher, not the final payload contract.
+	gamerGUID := []byte{
+		0x47, 0x4f, 0x4c, 0x45, 0x59, 0x2d, 0x53, 0x45,
+		0x52, 0x56, 0x45, 0x52, 0x2d, 0x30, 0x30, 0x31,
+	}
+	credential := []byte{
+		0x43, 0x52, 0x45, 0x44, 0x2d, 0x4c, 0x4f, 0x43,
+		0x41, 0x4c, 0x2d, 0x30, 0x30, 0x30, 0x31, 0x00,
+	}
+	plain = append(plain, gamerGUID...)
+	plain = append(plain, credential...)
+
+	packed := proudnet.EncodeCodecFrameBody(0, plain)
+	return wrapPN32Channel(0, packed)
+}
+
+func buildNotifyLoginOkRMI32Probe() []byte {
+	args := buildNotifyLoginOkArgs()
+	body := proudnet.NewMessage()
+	body.WriteHostID(1)
+	body.WriteInt32(proudnet.EntryS2C_NotifyLoginOk)
+	body.WriteBytes(args)
+
+	packed := proudnet.EncodeCodecFrameBody(0, body.Bytes())
+	return wrapPN32Channel(0, packed)
+}
+
+func buildNotifyLoginOkArgs() []byte {
+	out := make([]byte, 0, 32)
+	out = append(out,
+		0x47, 0x4f, 0x4c, 0x45, 0x59, 0x2d, 0x53, 0x45,
+		0x52, 0x56, 0x45, 0x52, 0x2d, 0x30, 0x30, 0x31,
+	)
+	out = append(out,
+		0x43, 0x52, 0x45, 0x44, 0x2d, 0x4c, 0x4f, 0x43,
+		0x41, 0x4c, 0x2d, 0x30, 0x30, 0x30, 0x31, 0x00,
+	)
+	return out
+}
+
+func containsDecodedRequestLogin(data []byte) bool {
+	r := bytes.NewReader(data)
+	for r.Len() > 0 {
+		f, err := proudnet.ReadFrame(r)
+		if err != nil {
+			return false
+		}
+		plain, err := proudnet.DecodeCodecFrameBody(byte(f.MsgType), f.Body)
+		if err != nil {
+			continue
+		}
+		if len(plain) == 246 &&
+			plain[0] == 0x86 && plain[1] == 0xff &&
+			plain[2] == 0x8b && plain[3] == 0xb3 {
+			return true
+		}
+	}
+	return false
 }
 
 func buildNotifyServerConnectSuccess(little bool) []byte {

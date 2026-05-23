@@ -72,6 +72,35 @@ static const DWORD GG_RESULT_PATCH_RVA = 0x935379;  // 0xD35379 (mov esi, eax)
 static const DWORD GG_OK_STATUS        = 0x755;
 static const DWORD DEFAULT_TR_IP_RVA   = 0xB84554;  // VA 0xF84554, "213.74.179.19"
 
+// FAZ79: runtime inbound S2C app-layer dispatcher hook. Static RE mapped the
+// dispatcher/handler/opcode skeleton (FAZ78b) but the handlers are string-less
+// parse->global-manager dispatch stubs, so the opcode->semantic mapping
+// (which opcode populates profile/team/card/roster) can't be told apart
+// statically. These read-only HW breakpoints capture it live:
+//   - DR1 @ 0x568A42: the generic u16 reader's STORE point. ecx = the value
+//     just read (= the message opcode for every dispatcher A/B/C/D). Logs the
+//     full opcode timeline (login -> lobby -> team).
+//   - DR0 @ 0x54AAEE: dispatcher A's `jmp [eax*4+0x54E95C]`. eax = handler
+//     index (0..0x12), raw opcode = eax + 0xFBF5, handler addr = table[eax].
+//     Takes the PRE-handler model snapshot.
+//   - DR3 @ 0x54E932: dispatcher A's single SEH-restore epilogue -- every
+//     handler (success AND fail) converges here. Takes the POST-handler model
+//     snapshot and diffs vs PRE -> shows whether THIS handler grew the
+//     card-book / changed a global manager.
+// Card-book anchor (static, from roster init 0xC0B2E5/0xC0B2EA):
+//   dataMgr = *(*(0x12BAA04) + 0x2C);  std::map @ dataMgr+0x3500,
+//   _Myhead @ +0x3504, _Mysize (count) @ +0x3508.
+// [TeamManager+0x48] is a transient UI object (stack arg of 0xC0B290), not a
+// global, so we monitor the card-book + the dispatcher's global managers
+// (0x101E2A0/0x101E2A4/0x101E2F8/0x101E30C) instead.
+static const DWORD FAZ79_READER_STORE_RVA = 0x168A42;  // 0x568A42 mov [esi],ecx (ecx=opcode)
+static const DWORD FAZ79_DISPA_JMP_RVA    = 0x14AAEE;  // 0x54AAEE jmp [eax*4+0x54E95C]
+static const DWORD FAZ79_DISPA_EPI_RVA    = 0x14E932;  // 0x54E932 SEH-restore epilogue
+static const DWORD FAZ79_DISPA_TABLE_VA   = 0x54E95C;  // jump table base (VA at link base)
+static const DWORD FAZ79_CARDBOOK_SINGLETON = 0x12BAA04;
+// Master toggle for the FAZ79 dispatcher hook (vs the old FAZ53 UI-loader diag).
+static const BOOL  FAZ79_DISPATCHER_HOOK = TRUE;
+
 // Parent's CreateProcessA call site that spawns the "trusted" child Goley_.
 // At 0xD35586/etc. happens; THIS specific site is the re-exec call.
 // Static disasm showed call [0x199854C] sites at 0x8DE91A/0x8E5015/0x8E5A19/0x8EA21B.
@@ -94,6 +123,40 @@ static const DWORD GG_MBW_CALL_NEXT_RVA = 0x93558B;
 // far enough to expose the next missing session/team state.
 static const DWORD TEAM_ROSTER_NULL_RVA      = 0x80B2D7; // 0xC0B2D7
 static const DWORD TEAM_ROSTER_CONTINUE_RVA  = 0x80B424; // after prefill loop
+static const BOOL  FAZ82_STARTER_TEAM_BOOTSTRAP = TRUE;
+
+// FAZ84/88: Team interactions can ask the client to copy a 0x246-byte team/card
+// entry from an empty backing vector. The UI has enough starter data to draw,
+// but no real server-populated entry exists yet, so the source pointer becomes
+// NULL at Goley+0x55E76 (`rep movs`). FAZ84 zeroed the destination, which
+// prevented crashes but later tripped "formation info error"; FAZ88 copies the
+// starter model snapshot instead so the vector entry stays structurally valid.
+static const DWORD TEAM_ENTRY_COPY_NULL_RVA   = 0x055E76; // 0x455E76
+static const DWORD TEAM_ENTRY_COPY_AFTER_RVA  = 0x055E7A; // after rep/movs
+static const DWORD TEAM_ENTRY_COPY_SIZE       = 0x246;
+
+// FAZ85: another Team interaction path refreshes [TeamManager+0x48] from
+// A572A0(); without real server profile/team payloads that returns NULL and
+// immediately crashes at `cmp edx, [ecx]`. Reattach the starter model there.
+static const DWORD TEAM_MODEL_REFRESH_NULL_RVA = 0x7E9B17; // 0xBE9B17
+
+// FAZ87: clicking reserve/formation cards can reach another Team model read
+// with ECX=NULL: `mov edx, [ecx + eax*8 + 0x141]`.
+static const DWORD TEAM_FORMATION_READ_NULL_RVA = 0x7EE56D; // 0xBEE56D
+
+// FAZ90: clicking a starting-XI player reaches the sibling roster read path
+// with ECX=NULL: `mov edx, [ecx + eax*8 + 0xE9]`.
+static const DWORD TEAM_STARTER_READ_NULL_RVA = 0x7EE536; // 0xBEE536
+
+// FAZ89: Team/Tactic UI can now render and survive navigation, but changing
+// formation/tactic fields still tries to show server-update errors because the
+// current session is client-side bootstrapped and no real profile/team save
+// round-trip exists. Filter only these known tactic update message ids so the
+// UI remains usable while the real inbound/server track is still unfinished.
+static const DWORD SYSTEM_MSG_SHOW_RVA = 0x6617E0; // 0xA617E0
+static const DWORD FLASH_MSG_SHOW_RVA  = 0x782790; // 0xB82790
+static const DWORD UI_MODAL_SHOW_RVA   = 0x781EB0; // 0xB81EB0, final GFx modal helper
+static const DWORD SIMPLE_MODAL_SHOW_RVA = 0x781FA0; // 0xB81FA0, single-text GFx modal helper
 
 // IAT slot kept for diagnostics (it's MEM_FREE at runtime due to Themida obfuscation)
 static const DWORD GOLEY_MBW_IAT_VA = 0x019984D4;
@@ -123,6 +186,15 @@ static DWORD g_mainThreadId = 0;                // DllMain runs on hijacked main
 // Gates LoadLibrary/GetProcAddress capture so we only log the POST-ready
 // integrity-check loads (0x8E8740) instead of drowning in normal-init noise.
 static volatile LONG g_ggReadySignaled = 0;
+static BYTE* g_faz82StarterTeamModel = NULL;
+static volatile DWORD g_faz82LastTeamManager = 0;
+
+typedef void (__stdcall *SystemMsgShow_t)(void* mgr, int msgId);
+static SystemMsgShow_t g_origSystemMsgShow = NULL;
+static void* g_origFlashMsgShow = NULL;
+static void* g_origUiModalShow = NULL;
+static void* g_origSimpleModalShow = NULL;
+static void WideToAnsiLog(LPCWSTR w, char* out, int cap);
 
 // FAZ21: master toggle for the loader-level capture hooks (LoadLibrary*,
 // GetProcAddress, ntdll!LdrLoadDll, ntdll!LdrGetProcedureAddress, UEF).
@@ -157,6 +229,92 @@ static void Log(const char* msg) {
     }
 }
 
+static void WriteU32Unaligned(BYTE* base, DWORD off, DWORD value) {
+    base[off + 0] = (BYTE)(value);
+    base[off + 1] = (BYTE)(value >> 8);
+    base[off + 2] = (BYTE)(value >> 16);
+    base[off + 3] = (BYTE)(value >> 24);
+}
+
+static DWORD Faz82StarterCardIdForAliasIndex(DWORD i) {
+    // The same logical roster is read through two bases that differ by one
+    // slot (+0xE5 and +0xED, likewise +0x13D and +0x145). Shift the alias fill
+    // so the older +0xED/+0x145 readers still see 0x1001..0x100B.
+    return 0x00001001 + ((i + 10) % 11);
+}
+
+static void FillFaz82CardIdAlias(BYTE* m, DWORD baseOff, DWORD count) {
+    for (DWORD i = 0; i < count; ++i) {
+        DWORD cardLo = Faz82StarterCardIdForAliasIndex(i);
+        WriteU32Unaligned(m, baseOff + i * 8, cardLo);
+        WriteU32Unaligned(m, baseOff + i * 8 + 4, 0);
+    }
+}
+
+static void NormalizeFaz82StarterTeamModel(BYTE* m) {
+    if (!m) return;
+
+    // FAZ95: Team UI handlers do not agree on one canonical base. Roster init
+    // reads +0xED/+0xF1, card click paths read +0xE5/+0xE9, and formation paths
+    // have the same one-slot alias at +0x13D/+0x141 versus +0x145/+0x149.
+    FillFaz82CardIdAlias(m, 0x0E5, 12);
+    FillFaz82CardIdAlias(m, 0x13D, 13);
+
+    // FAZ83: the Team tab exit/normality checks also require a few non-zero
+    // model metadata fields before they accept the roster as valid.
+    WriteU32Unaligned(m, 0x00, 1);
+    WriteU32Unaligned(m, 0x38, 1);
+    WriteU32Unaligned(m, 0x47, 1);
+    WriteU32Unaligned(m, 0x4B, 1);
+    WriteU32Unaligned(m, 0x4F, 1);
+
+    // A third branch in the same init function reads model+0x30/+0x34.
+    WriteU32Unaligned(m, 0x30, 0x00001001);
+    WriteU32Unaligned(m, 0x34, 0);
+}
+
+static BYTE* EnsureFaz82StarterTeamModel() {
+    if (g_faz82StarterTeamModel) {
+        NormalizeFaz82StarterTeamModel(g_faz82StarterTeamModel);
+        return g_faz82StarterTeamModel;
+    }
+
+    BYTE* m = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x400);
+    if (!m) {
+        Log("FAZ82: HeapAlloc starter team model FAILED");
+        return NULL;
+    }
+
+    NormalizeFaz82StarterTeamModel(m);
+
+    g_faz82StarterTeamModel = m;
+    char buf[220];
+    wsprintfA(buf, "FAZ95: allocated starter team model @0x%p roster/formation aliases filled valid-flags=1",
+              m);
+    Log(buf);
+    return m;
+}
+
+static BYTE* AttachFaz82StarterTeamModel(DWORD teamManager, const char* tag) {
+    BYTE* model = EnsureFaz82StarterTeamModel();
+    if (!model || !teamManager) return model;
+    __try {
+        *(DWORD*)(teamManager + 0x48) = (DWORD)(ULONG_PTR)model;
+        g_faz82LastTeamManager = teamManager;
+        static volatile LONG s_attachLog = 0;
+        LONG n = InterlockedIncrement(&s_attachLog);
+        if (n <= 18) {
+            char buf[260];
+            wsprintfA(buf, "FAZ95: attached normalized starter model=0x%p team=0x%08X tag=%s (hit=%ld)",
+                      model, teamManager, tag ? tag : "?", n);
+            Log(buf);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("FAZ95: exception while attaching normalized starter model");
+    }
+    return model;
+}
+
 // Forward decl: ClassifyEip is defined further down (thread-EIP poller helper)
 // but the FAZ21 post-ready broad logger in VehHandler needs it earlier.
 static const char* ClassifyEip(DWORD eip);
@@ -175,6 +333,57 @@ static void CopyStdStr(DWORD obj, char* out, int outsz) {
     int i = 0; for (; i < n; ++i) out[i] = src[i];
     out[i] = 0;
 }
+
+// FAZ79: a compact signature of the inbound-model state we monitor across an
+// S2C handler. Card-book is the concrete blocker (no cards -> can't fill the
+// starting XI), so its count is the primary signal; the dispatcher's global
+// manager pointers catch profile/team manager (re)allocation.
+typedef struct {
+    DWORD singleton;   // *(0x12BAA04)
+    DWORD dataMgr;     // *(singleton+0x2C)
+    DWORD cbHead;      // *(dataMgr+0x3504)  std::map _Myhead
+    DWORD cbSize;      // *(dataMgr+0x3508)  std::map _Mysize (card count)
+    DWORD mgrA0;       // *(0x101E2A0)
+    DWORD mgrA4;       // *(0x101E2A4)
+    DWORD mgrF8;       // *(0x101E2F8)
+    DWORD mgr0C;       // *(0x101E30C)
+} ModelSig;
+
+// Fill `s` from live memory; every deref is guarded (pointers may be NULL/wild
+// before the managers are constructed). Returns nothing -- unreadable fields
+// stay 0.
+static void SnapshotModel(ModelSig* s) {
+    memset(s, 0, sizeof(*s));
+    __try {
+        s->singleton = *(volatile DWORD*)FAZ79_CARDBOOK_SINGLETON;
+        if (s->singleton) {
+            s->dataMgr = *(volatile DWORD*)(s->singleton + 0x2C);
+            if (s->dataMgr) {
+                s->cbHead = *(volatile DWORD*)(s->dataMgr + 0x3504);
+                s->cbSize = *(volatile DWORD*)(s->dataMgr + 0x3508);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { s->mgrA0 = *(volatile DWORD*)0x101E2A0; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { s->mgrA4 = *(volatile DWORD*)0x101E2A4; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { s->mgrF8 = *(volatile DWORD*)0x101E2F8; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { s->mgr0C = *(volatile DWORD*)0x101E30C; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static int ModelSigDiffers(const ModelSig* a, const ModelSig* b) {
+    return memcmp(a, b, sizeof(ModelSig)) != 0;
+}
+
+// FAZ79 per-dispatch state. RMI dispatch is single-threaded (one ProudNet
+// worker), so a plain global pre-snapshot paired across DR0 (0x54AAEE) -> DR3
+// (0x54E932) within one invocation is safe.
+static ModelSig      g_faz79Pre;            // PRE-handler snapshot (set at DR0)
+static volatile LONG g_faz79InDispatch = 0; // 1 between DR0 and DR3
+static DWORD         g_faz79CurOpcode = 0;  // raw opcode of in-flight dispatch
+static DWORD         g_faz79CurIndex  = 0;  // handler index
+static DWORD         g_faz79CurHandler= 0;  // handler runtime addr
+static volatile LONG g_faz79DispCount = 0;  // dispatcher A invocations seen
+static volatile LONG g_faz79ReaderLog = 0;  // reader-store log budget counter
 
 // VEH handler:gets called whenever ANY exception fires in the process.
 static LONG CALLBACK VehHandler(PEXCEPTION_POINTERS exc) {
@@ -356,6 +565,87 @@ static LONG CALLBACK VehHandler(PEXCEPTION_POINTERS exc) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
+        // -- FAZ79: inbound S2C app-layer dispatcher hook (read-only diag).
+        //    Captures the opcode->handler->model-write mapping LIVE so we can
+        //    tell which opcode populates profile/team/card/roster. All three
+        //    sites keep their BP armed via RF and never alter control flow.
+        if (FAZ79_DISPATCHER_HOOK && g_imageBase) {
+            DWORD readerVA  = (DWORD)(g_imageBase + FAZ79_READER_STORE_RVA);
+            DWORD dispJmpVA = (DWORD)(g_imageBase + FAZ79_DISPA_JMP_RVA);
+            DWORD dispEpiVA = (DWORD)(g_imageBase + FAZ79_DISPA_EPI_RVA);
+
+            // (a) generic u16 reader STORE point: ecx = value just read = opcode.
+            if (eip == readerVA) {
+                DWORD op = exc->ContextRecord->Ecx & 0xFFFF;
+                LONG h = InterlockedIncrement(&g_faz79ReaderLog);
+                if (h <= 400) {
+                    char buf[96];
+                    wsprintfA(buf, "FAZ79 reader: opcode=0x%04X (#%ld)", op, (long)h);
+                    Log(buf);
+                }
+                exc->ContextRecord->EFlags |= 0x10000;  // RF: keep armed
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+
+            // (b) dispatcher A `jmp [eax*4+0x54E95C]`: eax = handler index.
+            //     Raw opcode = idx + 0xFBF5; handler addr = table[idx].
+            //     Take the PRE-handler model snapshot.
+            if (eip == dispJmpVA) {
+                DWORD idx = exc->ContextRecord->Eax;        // guaranteed 0..0x12
+                DWORD raw = idx + 0xFBF5;
+                DWORD handler = 0;
+                __try {
+                    DWORD tbl = (DWORD)(g_imageBase + (FAZ79_DISPA_TABLE_VA - 0x400000));
+                    handler = *(volatile DWORD*)(tbl + idx * 4);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                SnapshotModel(&g_faz79Pre);
+                g_faz79CurOpcode  = raw;
+                g_faz79CurIndex   = idx;
+                g_faz79CurHandler = handler;
+                InterlockedExchange(&g_faz79InDispatch, 1);
+                LONG dn = InterlockedIncrement(&g_faz79DispCount);
+                DWORD hrva = handler ? (handler - (DWORD)g_imageBase + 0x400000) : 0;
+                char buf[240];
+                wsprintfA(buf,
+                    "FAZ79 dispA #%ld: op=0x%04X idx=%lu handler=0x%X | PRE cb_size=%lu cb_head=0x%X dataMgr=0x%X",
+                    (long)dn, raw, idx, hrva,
+                    g_faz79Pre.cbSize, g_faz79Pre.cbHead, g_faz79Pre.dataMgr);
+                Log(buf);
+                exc->ContextRecord->EFlags |= 0x10000;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+
+            // (c) dispatcher A SEH-restore epilogue (all handlers converge):
+            //     POST-handler snapshot + diff vs PRE -> which opcode changed
+            //     the card-book / a global manager.
+            if (eip == dispEpiVA) {
+                if (InterlockedCompareExchange(&g_faz79InDispatch, 0, 1) == 1) {
+                    ModelSig post;
+                    SnapshotModel(&post);
+                    if (ModelSigDiffers(&g_faz79Pre, &post)) {
+                        DWORD hrva = g_faz79CurHandler
+                                     ? (g_faz79CurHandler - (DWORD)g_imageBase + 0x400000) : 0;
+                        char buf[400];
+                        wsprintfA(buf,
+                            "FAZ79 *** MODEL CHANGED by op=0x%04X (idx=%lu handler=0x%X): "
+                            "cb_size %lu->%lu cb_head 0x%X->0x%X dataMgr 0x%X->0x%X "
+                            "mgrA0 0x%X->0x%X mgrA4 0x%X->0x%X mgrF8 0x%X->0x%X mgr0C 0x%X->0x%X",
+                            g_faz79CurOpcode, g_faz79CurIndex, hrva,
+                            g_faz79Pre.cbSize, post.cbSize,
+                            g_faz79Pre.cbHead, post.cbHead,
+                            g_faz79Pre.dataMgr, post.dataMgr,
+                            g_faz79Pre.mgrA0, post.mgrA0,
+                            g_faz79Pre.mgrA4, post.mgrA4,
+                            g_faz79Pre.mgrF8, post.mgrF8,
+                            g_faz79Pre.mgr0C, post.mgr0C);
+                        Log(buf);
+                    }
+                }
+                exc->ContextRecord->EFlags |= 0x10000;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+
         // -- FAZ49 DIAGNOSTIC: UI-loader reachability. The GG teardowns are solved
         //    (faz45/48 data-poke), the game is stable, but the screen is flat gray
         //    and FILELOG=0 -> the login/UI never loads. Codex asked to log whether
@@ -438,6 +728,24 @@ static LONG CALLBACK VehHandler(PEXCEPTION_POINTERS exc) {
             exc->ContextRecord->Esi == 0) {
             static volatile LONG s_teamNullHits = 0;
             LONG h = InterlockedIncrement(&s_teamNullHits);
+            if (FAZ82_STARTER_TEAM_BOOTSTRAP) {
+                BYTE* model = AttachFaz82StarterTeamModel(exc->ContextRecord->Ebx, "roster-null");
+                if (model) {
+                    __try {
+                        exc->ContextRecord->Eax = (DWORD)(ULONG_PTR)model;
+                        if (h <= 8) {
+                            char tbuf[280];
+                            wsprintfA(tbuf,
+                                      "FAZ82: attached starter team model 0x%p to TeamManager ebx=0x%08X; retry roster read at 0x%X (hit=%ld)",
+                                      model, exc->ContextRecord->Ebx, eip, h);
+                            Log(tbuf);
+                        }
+                        return EXCEPTION_CONTINUE_EXECUTION;
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        Log("FAZ82: exception while attaching starter team model; falling back to FAZ77 skip");
+                    }
+                }
+            }
             if (h <= 8) {
                 char tbuf[240];
                 wsprintfA(tbuf,
@@ -448,6 +756,125 @@ static LONG CALLBACK VehHandler(PEXCEPTION_POINTERS exc) {
             }
             exc->ContextRecord->Eip = (DWORD)(g_imageBase + TEAM_ROSTER_CONTINUE_RVA);
             return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        // FAZ84/88: Team tab click/drag/top-menu handlers can hit a vector-style
+        // copy helper with ESI=NULL because the real server never populated the
+        // backing team/card entry list. Copy the starter model snapshot into the
+        // destination entry instead of letting `rep movs` read from 0.
+        if (code == EXCEPTION_ACCESS_VIOLATION && g_imageBase &&
+            eip == (DWORD)(g_imageBase + TEAM_ENTRY_COPY_NULL_RVA) &&
+            faultAddr == 0 &&
+            exc->ContextRecord->Esi == 0 &&
+            exc->ContextRecord->Edi != 0) {
+            static volatile LONG s_entryCopyNullHits = 0;
+            LONG h = InterlockedIncrement(&s_entryCopyNullHits);
+            BYTE* model = EnsureFaz82StarterTeamModel();
+            if (!model) {
+                Log("FAZ88: starter model missing for Team entry copy fallback");
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            __try {
+                CopyMemory((void*)exc->ContextRecord->Edi, model, TEAM_ENTRY_COPY_SIZE);
+                if (h <= 12) {
+                    char tbuf[320];
+                    wsprintfA(tbuf,
+                              "FAZ88: Team entry copy source NULL at 0x%X; copy starter model=0x%p to dst=0x%08X size=0x%X -> 0x%X (hit=%ld)",
+                              eip, model, exc->ContextRecord->Edi, TEAM_ENTRY_COPY_SIZE,
+                              (DWORD)(g_imageBase + TEAM_ENTRY_COPY_AFTER_RVA), h);
+                    Log(tbuf);
+                }
+                exc->ContextRecord->Eip = (DWORD)(g_imageBase + TEAM_ENTRY_COPY_AFTER_RVA);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                Log("FAZ88: failed to copy starter model into Team entry destination; continuing normal exception chain");
+            }
+        }
+
+        // FAZ85: A572A0() can return NULL and overwrite [TeamManager+0x48]
+        // during Team tab interaction. Put our starter model back in ECX and
+        // [this+0x48], then retry the same compare instruction.
+        if (code == EXCEPTION_ACCESS_VIOLATION && g_imageBase &&
+            eip == (DWORD)(g_imageBase + TEAM_MODEL_REFRESH_NULL_RVA) &&
+            faultAddr == 0 &&
+            exc->ContextRecord->Ecx == 0) {
+            static volatile LONG s_modelRefreshNullHits = 0;
+            LONG h = InterlockedIncrement(&s_modelRefreshNullHits);
+            BYTE* model = EnsureFaz82StarterTeamModel();
+            if (model) {
+                __try {
+                    DWORD teamManager = *(DWORD*)(exc->ContextRecord->Ebp + 8);
+                    AttachFaz82StarterTeamModel(teamManager, "refresh-null");
+                    exc->ContextRecord->Ecx = (DWORD)(ULONG_PTR)model;
+                    if (h <= 12) {
+                        char tbuf[300];
+                        wsprintfA(tbuf,
+                                  "FAZ85: Team model refresh returned NULL at 0x%X; reattach model=0x%p team=0x%08X and retry (hit=%ld)",
+                                  eip, model, teamManager, h);
+                        Log(tbuf);
+                    }
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    Log("FAZ85: exception while reattaching starter model after refresh NULL");
+                }
+            }
+        }
+
+        // FAZ87: Reserve/formation card click reads model+0x141 list through
+        // ECX. The fake session has no real inbound team model, so some UI
+        // paths arrive with ECX=NULL even though TeamManager still exists.
+        if (code == EXCEPTION_ACCESS_VIOLATION && g_imageBase &&
+            eip == (DWORD)(g_imageBase + TEAM_STARTER_READ_NULL_RVA) &&
+            faultAddr < 0x400 &&
+            exc->ContextRecord->Ecx == 0) {
+            static volatile LONG s_starterReadNullHits = 0;
+            LONG h = InterlockedIncrement(&s_starterReadNullHits);
+            BYTE* model = EnsureFaz82StarterTeamModel();
+            if (model) {
+                __try {
+                    DWORD teamManager = exc->ContextRecord->Ebx;
+                    AttachFaz82StarterTeamModel(teamManager, "starter-read-null");
+                    exc->ContextRecord->Ecx = (DWORD)(ULONG_PTR)model;
+                    if (h <= 12) {
+                        char tbuf[300];
+                        wsprintfA(tbuf,
+                                  "FAZ90: Team starter read ECX=NULL at 0x%X fault=0x%X idx=%lu; model=0x%p team=0x%08X retry (hit=%ld)",
+                                  eip, faultAddr, exc->ContextRecord->Eax,
+                                  model, teamManager, h);
+                        Log(tbuf);
+                    }
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    Log("FAZ90: exception while reattaching starter model for starter read");
+                }
+            }
+        }
+
+        if (code == EXCEPTION_ACCESS_VIOLATION && g_imageBase &&
+            eip == (DWORD)(g_imageBase + TEAM_FORMATION_READ_NULL_RVA) &&
+            faultAddr < 0x400 &&
+            exc->ContextRecord->Ecx == 0) {
+            static volatile LONG s_formationReadNullHits = 0;
+            LONG h = InterlockedIncrement(&s_formationReadNullHits);
+            BYTE* model = EnsureFaz82StarterTeamModel();
+            if (model) {
+                __try {
+                    DWORD teamManager = exc->ContextRecord->Ebx;
+                    AttachFaz82StarterTeamModel(teamManager, "formation-read-null");
+                    exc->ContextRecord->Ecx = (DWORD)(ULONG_PTR)model;
+                    if (h <= 12) {
+                        char tbuf[300];
+                        wsprintfA(tbuf,
+                                  "FAZ87: Team formation read ECX=NULL at 0x%X fault=0x%X idx=%lu; model=0x%p team=0x%08X retry (hit=%ld)",
+                                  eip, faultAddr, exc->ContextRecord->Eax,
+                                  model, teamManager, h);
+                        Log(tbuf);
+                    }
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    Log("FAZ87: exception while reattaching starter model for formation read");
+                }
+            }
         }
 
         // AV-rescue RE-ENABLED for the IFEO-wrapper setup. Previously
@@ -1957,7 +2384,16 @@ static GetProcAddressGame_t g_origGetProcAddressGame = NULL;
 // Best-effort wide->ANSI for logging a DLL path (truncate at cap-1).
 static void WideToAnsiLog(LPCWSTR w, char* out, int cap) {
     int i = 0;
-    if (w) for (; i < cap - 1 && w[i]; i++) out[i] = (w[i] < 0x80) ? (char)w[i] : '?';
+    __try {
+        if (w) {
+            for (; i < cap - 1 && w[i]; i++) {
+                out[i] = (w[i] < 0x80) ? (char)w[i] : '?';
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        const char* bad = "<bad-wstr>";
+        for (i = 0; i < cap - 1 && bad[i]; ++i) out[i] = bad[i];
+    }
     out[i] = 0;
 }
 
@@ -2415,6 +2851,11 @@ static WSASend_t g_origWSASend = NULL;
 static recv_t    g_origRecv    = NULL;
 static WSARecv_t g_origWSARecv = NULL;
 static volatile LONG g_netLogCount = 0;
+static volatile LONG g_faz99RecvStateLogCount = 0;
+static volatile LONG g_faz100RecvPumpLogCount = 0;
+static volatile LONG g_faz101ReadPollLogCount = 0;
+static volatile LONG g_faz101ReadPacketLogCount = 0;
+static void FormatHexPrefix(const BYTE* data, int len, char* out, int outCap);
 
 static void BuildTinyBacktrace(char* out, int cap) {
     out[0] = 0;
@@ -2494,9 +2935,235 @@ static void LogNetBytes(const char* api, void* ra, const BYTE* data, int len) {
     LeaveHook();
 }
 
+static void LogFaz99RecvState(const char* api, SOCKET_COMPAT sock, int got, void* callerRa) {
+    if (got <= 0 || !g_imageBase) return;
+
+    DWORD caller = (DWORD)(ULONG_PTR)callerRa;
+    DWORD rva = (caller >= (DWORD)(ULONG_PTR)g_imageBase)
+                    ? caller - (DWORD)(ULONG_PTR)g_imageBase : caller;
+    if (rva < 0x669380 || rva > 0x669470) return; // expected return from 0xA69380 recv path
+
+    LONG n = InterlockedIncrement(&g_faz99RecvStateLogCount);
+    if (n > 40) return;
+
+    DWORD* fp = NULL;
+#if defined(_M_IX86)
+    __asm { mov fp, ebp }
+#endif
+    DWORD manager = 0;
+    int slot = -1;
+    DWORD stateA = 0, stateB = 0, bufObj = 0, b0 = 0, b4 = 0, b8 = 0, bC = 0;
+
+    __try {
+        DWORD* callerFp = fp ? (DWORD*)fp[0] : NULL;
+        DWORD lockOrArg = callerFp ? callerFp[2] : 0;
+        manager = lockOrArg ? (lockOrArg - 0x78) : 0; // 0xA69399 rewrites [ebp+8] to manager+0x78
+
+        if (manager) {
+            for (int i = 0; i < 16; ++i) {
+                DWORD s = *(volatile DWORD*)(manager + 0x94 + i * 4);
+                if (s == (DWORD)sock) {
+                    slot = i;
+                    stateA = *(volatile DWORD*)(manager + 0x12C + i * 0x14);
+                    stateB = *(volatile DWORD*)(manager + 0x128 + i * 0x14);
+                    bufObj = *(volatile DWORD*)(manager + 0x25C + i * 4);
+                    if (bufObj) {
+                        b0 = *(volatile DWORD*)(bufObj + 0x00);
+                        b4 = *(volatile DWORD*)(bufObj + 0x04);
+                        b8 = *(volatile DWORD*)(bufObj + 0x08);
+                        bC = *(volatile DWORD*)(bufObj + 0x0C);
+                    }
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (!EnterHook()) return;
+    __try {
+        char msg[520];
+        wsprintfA(msg,
+                  "FAZ99: %s after native recv rva=0x%X sock=0x%08X got=%d manager=0x%08X slot=%d stateA=%lu stateB=%lu buf=0x%08X b0=0x%08X b4=0x%08X b8=0x%08X bC=0x%08X pending=%ld",
+                  api ? api : "recv", rva, (DWORD)sock, got, manager, slot,
+                  stateA, stateB, bufObj, b0, b4, b8, bC, (long)(bC - b8));
+        Log(msg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("FAZ99: exception while logging recv state");
+    }
+    LeaveHook();
+}
+
+static void __stdcall LogFaz100RecvPump(DWORD manager, DWORD slot, int phase) {
+    if (!manager || slot > 0x0F) return;
+    LONG n = InterlockedIncrement(&g_faz100RecvPumpLogCount);
+    if (n > 80) return;
+
+    DWORD sock = 0, stateA = 0, stateB = 0, bufObj = 0;
+    DWORD b0 = 0, b4 = 0, b8 = 0, bC = 0, b10 = 0, b14 = 0, b18 = 0, b1C = 0;
+    char fillHex[3 * 32 + 1];
+    char parseHex[3 * 32 + 1];
+    fillHex[0] = 0;
+    parseHex[0] = 0;
+
+    __try {
+        sock = *(volatile DWORD*)(manager + 0x94 + slot * 4);
+        stateA = *(volatile DWORD*)(manager + 0x12C + slot * 0x14);
+        stateB = *(volatile DWORD*)(manager + 0x128 + slot * 0x14);
+        bufObj = *(volatile DWORD*)(manager + 0x25C + slot * 4);
+        if (bufObj) {
+            b0 = *(volatile DWORD*)(bufObj + 0x00);
+            b4 = *(volatile DWORD*)(bufObj + 0x04);
+            b8 = *(volatile DWORD*)(bufObj + 0x08);
+            bC = *(volatile DWORD*)(bufObj + 0x0C);
+            b10 = *(volatile DWORD*)(bufObj + 0x10);
+            b14 = *(volatile DWORD*)(bufObj + 0x14);
+            b18 = *(volatile DWORD*)(bufObj + 0x18);
+            b1C = *(volatile DWORD*)(bufObj + 0x1C);
+            if (b8 && bC > b8 && bC - b8 <= 512) {
+                FormatHexPrefix((const BYTE*)b8, (int)(bC - b8), fillHex, sizeof(fillHex));
+            }
+            if (b18 && b1C > b18 && b1C - b18 <= 512) {
+                FormatHexPrefix((const BYTE*)b18, (int)(b1C - b18), parseHex, sizeof(parseHex));
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (!EnterHook()) return;
+    __try {
+        char msg[900];
+        wsprintfA(msg,
+                  "FAZ100: recv-pump %s manager=0x%08X slot=%lu sock=0x%08X stateA=%lu stateB=%lu buf=0x%08X b0=0x%08X b4=0x%08X b8=0x%08X bC=0x%08X fillPending=%ld fill=%s b10=0x%08X b14=0x%08X b18=0x%08X b1C=0x%08X parsePending=%ld parse=%s",
+                  phase ? "post" : "pre", manager, slot, sock, stateA, stateB,
+                  bufObj, b0, b4, b8, bC, (long)(bC - b8), fillHex,
+                  b10, b14, b18, b1C, (long)(b1C - b18), parseHex);
+        Log(msg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("FAZ100: exception while logging recv-pump");
+    }
+    LeaveHook();
+}
+
+static void __stdcall LogFaz101ReadPoll(DWORD manager, DWORD outStream, int ret) {
+    if (!manager) return;
+
+    DWORD slot = 1;
+    DWORD sock = 0, s0 = 0, s4 = 0, s8 = 0, seqExpected = 0, bufObj = 0;
+    DWORD b8 = 0, bC = 0, pending = 0, hdrType = 0, hdrLen = 0, hdrSeq = 0;
+    char headHex[3 * 32 + 1];
+    headHex[0] = 0;
+
+    __try {
+        sock = *(volatile DWORD*)(manager + 0x94 + slot * 4);
+        s0 = *(volatile DWORD*)(manager + 0x124 + slot * 0x14);
+        s4 = *(volatile DWORD*)(manager + 0x128 + slot * 0x14);
+        s8 = *(volatile DWORD*)(manager + 0x12C + slot * 0x14);
+        seqExpected = *(volatile BYTE*)(manager + 0x2A0 + slot * 8);
+        bufObj = *(volatile DWORD*)(manager + 0x25C + slot * 4);
+        if (bufObj) {
+            b8 = *(volatile DWORD*)(bufObj + 0x08);
+            bC = *(volatile DWORD*)(bufObj + 0x0C);
+            if (b8 && bC >= b8) {
+                pending = bC - b8;
+                if (pending >= 4 && pending <= 0x2000) {
+                    hdrType = *(volatile BYTE*)(b8 + 0);
+                    hdrLen = *(volatile WORD*)(b8 + 1);
+                    hdrSeq = *(volatile BYTE*)(b8 + 3);
+                }
+                if (pending > 0 && pending <= 512) {
+                    FormatHexPrefix((const BYTE*)b8, (int)pending, headHex, sizeof(headHex));
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (pending == 0 && ret <= 0) return;
+    LONG n = InterlockedIncrement(&g_faz101ReadPollLogCount);
+    if (n > 120) return;
+
+    if (!EnterHook()) return;
+    __try {
+        char msg[760];
+        wsprintfA(msg,
+                  "FAZ101: read-poll ret=%d manager=0x%08X out=0x%08X slot=%lu sock=0x%08X st0=%lu st4=%lu st8=%lu seqExpect=%lu buf=0x%08X pending=%lu hdr[type=0x%02X len=%lu seq=%lu] head=%s",
+                  ret, manager, outStream, slot, sock, s0, s4, s8, seqExpected,
+                  bufObj, pending, hdrType, hdrLen, hdrSeq, headHex);
+        Log(msg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("FAZ101: exception while logging read-poll");
+    }
+    LeaveHook();
+}
+
+static void __stdcall LogFaz101ReadPacket(DWORD manager, DWORD slot, DWORD outStream, int ret, int phase) {
+    if (!manager || slot > 0x0F) return;
+
+    DWORD sock = 0, s0 = 0, s4 = 0, s8 = 0, seqExpected = 0, bufObj = 0;
+    DWORD b8 = 0, bC = 0, pending = 0, hdrType = 0, hdrLen = 0, hdrSeq = 0;
+    char headHex[3 * 32 + 1];
+    headHex[0] = 0;
+
+    __try {
+        sock = *(volatile DWORD*)(manager + 0x94 + slot * 4);
+        s0 = *(volatile DWORD*)(manager + 0x124 + slot * 0x14);
+        s4 = *(volatile DWORD*)(manager + 0x128 + slot * 0x14);
+        s8 = *(volatile DWORD*)(manager + 0x12C + slot * 0x14);
+        seqExpected = *(volatile BYTE*)(manager + 0x2A0 + slot * 8);
+        bufObj = *(volatile DWORD*)(manager + 0x25C + slot * 4);
+        if (bufObj) {
+            b8 = *(volatile DWORD*)(bufObj + 0x08);
+            bC = *(volatile DWORD*)(bufObj + 0x0C);
+            if (b8 && bC >= b8) {
+                pending = bC - b8;
+                if (pending >= 4 && pending <= 0x2000) {
+                    hdrType = *(volatile BYTE*)(b8 + 0);
+                    hdrLen = *(volatile WORD*)(b8 + 1);
+                    hdrSeq = *(volatile BYTE*)(b8 + 3);
+                }
+                if (pending > 0 && pending <= 512) {
+                    FormatHexPrefix((const BYTE*)b8, (int)pending, headHex, sizeof(headHex));
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (pending == 0 && ret <= 0) return;
+    LONG n = InterlockedIncrement(&g_faz101ReadPacketLogCount);
+    if (n > 120) return;
+
+    if (!EnterHook()) return;
+    __try {
+        char msg[760];
+        wsprintfA(msg,
+                  "FAZ101: read-packet %s ret=%d manager=0x%08X slot=%lu out=0x%08X sock=0x%08X st0=%lu st4=%lu st8=%lu seqExpect=%lu buf=0x%08X pending=%lu hdr[type=0x%02X len=%lu seq=%lu] head=%s",
+                  phase ? "post" : "pre", ret, manager, slot, outStream, sock,
+                  s0, s4, s8, seqExpected, bufObj, pending, hdrType, hdrLen,
+                  hdrSeq, headHex);
+        Log(msg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("FAZ101: exception while logging read-packet");
+    }
+    LeaveHook();
+}
+
+static BOOL IsEncodedConnectHelloFrame(const BYTE* data, int len);
+static BOOL ForceLocalConnectSuccessFromGlobalNet(const char* tag);
+
 static int WINAPI HookedSend(SOCKET_COMPAT s, const char* buf, int len, int flags) {
     LogNetBytes("send", _ReturnAddress(), (const BYTE*)buf, len);
-    return g_origSend(s, buf, len, flags);
+    BOOL connectHello = IsEncodedConnectHelloFrame((const BYTE*)buf, len);
+    int ret = g_origSend(s, buf, len, flags);
+    if (ret > 0 && connectHello) {
+        ForceLocalConnectSuccessFromGlobalNet("send-login28");
+    }
+    return ret;
 }
 
 static int WINAPI HookedWSASend(SOCKET_COMPAT s, LPWSABUF_COMPAT bufs, DWORD count,
@@ -2512,12 +3179,25 @@ static int WINAPI HookedWSASend(SOCKET_COMPAT s, LPWSABUF_COMPAT bufs, DWORD cou
             LogNetBytes(api, _ReturnAddress(), (const BYTE*)bufs[i].buf, (int)bufs[i].len);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return g_origWSASend(s, bufs, count, sent, flags, ov, cb);
+    BOOL connectHello = FALSE;
+    __try {
+        connectHello = (bufs && count > 0 &&
+                        IsEncodedConnectHelloFrame((const BYTE*)bufs[0].buf, (int)bufs[0].len));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    int ret = g_origWSASend(s, bufs, count, sent, flags, ov, cb);
+    if (ret == 0 && connectHello) {
+        ForceLocalConnectSuccessFromGlobalNet("wsasend-login28");
+    }
+    return ret;
 }
 
 static int WINAPI HookedRecv(SOCKET_COMPAT s, char* buf, int len, int flags) {
     int r = g_origRecv(s, buf, len, flags);
-    if (r > 0) LogNetBytes("recv", _ReturnAddress(), (const BYTE*)buf, r);
+    if (r > 0) {
+        void* ra = _ReturnAddress();
+        LogNetBytes("recv", ra, (const BYTE*)buf, r);
+        LogFaz99RecvState("recv", s, r, ra);
+    }
     return r;
 }
 
@@ -2604,20 +3284,30 @@ typedef BOOL (__stdcall *ProudEncode_t)(void* keyCtx, BYTE channel, BYTE* outBuf
                                         int outCap, const BYTE* plain, int plainLen);
 static ProudEncode_t g_origProudEncode = NULL;
 static volatile LONG g_codecLogCount = 0;
+static volatile LONG g_codecDumpCount = 0;
 typedef int (__stdcall *ProudRawSendEntry_t)(const BYTE* payload, int len);
 static ProudRawSendEntry_t g_origProudRawSendEntry = NULL;
 typedef int (__stdcall *ProudSendWrapper_t)(void* netObj, int slot, const BYTE* payload, int len);
 static ProudSendWrapper_t g_origProudSendWrapper = NULL;
+typedef void (__stdcall *ProudRecvPump_t)(DWORD manager);
+static ProudRecvPump_t g_origProudRecvPump = NULL;
+typedef int (__stdcall *ProudReadPoll_t)(DWORD outStream);
+static ProudReadPoll_t g_origProudReadPoll = NULL;
+typedef int (__stdcall *ProudReadPacket_t)(DWORD manager, DWORD outStream);
+static ProudReadPacket_t g_origProudReadPacket = NULL;
 static volatile LONG g_rawEntryLogCount = 0;
 static volatile LONG g_sendWrapperLogCount = 0;
+static volatile LONG g_proudKeyDumpCount = 0;
 static volatile LONG g_forcedConnectSuccess = 0;
 static volatile LONG g_requestLoginObserved = 0;
 static volatile DWORD g_requestLoginTick = 0;
 static volatile LONG g_forcedLobbyPane = 0;
 static volatile LONG g_error93LatchLogged = 0;
 static volatile DWORD g_lastLobbyNetStateLog = 0;
+static volatile DWORD g_lastFaz103PollTick = 0;
+static volatile LONG g_faz103PollCallCount = 0;
 static const BOOL FORCE_LOCAL_CONNECT_SUCCESS = TRUE;
-static const BOOL ENABLE_PROUD_CODEC_DIAG = FALSE;
+static const BOOL ENABLE_PROUD_CODEC_DIAG = TRUE;
 static const BOOL FORCE_ERROR93_ONCE_LATCH = TRUE;
 static const BOOL ENABLE_POSTREADY_THREAD_DUMPS = FALSE;
 // FAZ70: keep the stable FAZ66 login path clean. The FAZ67-69 Viz hooks/scanner
@@ -2628,6 +3318,63 @@ static volatile LONG g_vizCtorLogCount = 0;
 static volatile LONG g_vizDispatcherLogCount = 0;
 static void* g_lastVizClientObj = NULL;
 static void ScanVizClientObjects();
+
+static BOOL IsEncodedConnectHelloFrame(const BYTE* data, int len) {
+    BOOL yes = FALSE;
+    __try {
+        yes = (data && len == 28 &&
+               data[0] == 0x32 && data[1] == 0x18 &&
+               data[2] == 0x00 && data[3] == 0x00);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        yes = FALSE;
+    }
+    return yes;
+}
+
+static BOOL ForceLocalConnectSuccessWithWrapper(DWORD wrapper, const char* tag) {
+    if (!FORCE_LOCAL_CONNECT_SUCCESS || !wrapper || !g_imageBase) return FALSE;
+    if (InterlockedCompareExchange(&g_forcedConnectSuccess, 1, 0) != 0) return FALSE;
+
+    BOOL forced = FALSE;
+    BYTE pkt[32];
+    ZeroMemory(pkt, sizeof(pkt));
+    pkt[5] = 0; // key table index used by 0xA68560
+    CopyMemory(pkt + 0x0C, "0123456789", 10); // accepted by 0xA684C0
+    DWORD fn = (DWORD)(g_imageBase + 0x673CA0); // 0xA73CA0 post-connect handler
+    DWORD pktPtr = (DWORD)(ULONG_PTR)pkt;
+
+    if (EnterHook()) {
+        char buf[240];
+        wsprintfA(buf, "[PNRAW/FORCE3] invoking local connect-success handler wrapper=0x%08X tag=%s",
+                  wrapper, tag ? tag : "?");
+        Log(buf);
+        LeaveHook();
+    }
+#if defined(_M_IX86)
+    __try {
+        __asm {
+            mov eax, pktPtr
+            push wrapper
+            call fn
+            mov forced, 1
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (EnterHook()) { Log("[PNRAW/FORCE3] exception while invoking 0xA73CA0"); LeaveHook(); }
+    }
+#endif
+    return forced;
+}
+
+static BOOL ForceLocalConnectSuccessFromGlobalNet(const char* tag) {
+    DWORD app = 0, wrapper = 0;
+    __try {
+        app = *(volatile DWORD*)0x12BAA04;
+        if (app) wrapper = *(volatile DWORD*)(app + 0x28);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        wrapper = 0;
+    }
+    return ForceLocalConnectSuccessWithWrapper(wrapper, tag);
+}
 
 static void FormatHexPrefix(const BYTE* data, int len, char* out, int outCap) {
     out[0] = 0;
@@ -2648,6 +3395,23 @@ static void FormatHexPrefix(const BYTE* data, int len, char* out, int outCap) {
         return;
     }
     out[pos] = 0;
+}
+
+static void SaveCodecDump(const char* tag, LONG seq, BYTE channel, const BYTE* data, int len) {
+    if (!tag || !data || len <= 0 || len > 4096) return;
+    __try {
+        char path[MAX_PATH];
+        wsprintfA(path, "C:\\Joygame\\goley-rev\\dumps\\pncodec_%lu_%03ld_ch_%u_%s_len_%d.bin",
+                  GetCurrentProcessId(), seq, (unsigned)channel, tag, len);
+        HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD wrote = 0;
+            WriteFile(h, data, (DWORD)len, &wrote, NULL);
+            CloseHandle(h);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 static void LogCodecBytes(const char* tag, void* keyCtx, BYTE channel,
@@ -2672,9 +3436,26 @@ static void LogCodecBytes(const char* tag, void* keyCtx, BYTE channel,
 static BOOL __stdcall HookedProudEncode(void* keyCtx, BYTE channel, BYTE* outBuf,
                                         int outCap, const BYTE* plain, int plainLen) {
     LogCodecBytes("IN", keyCtx, channel, plain, plainLen, outCap);
+    LONG dumpSeq = 0;
+    if (plain && plainLen > 0 && plainLen <= 512) {
+        dumpSeq = InterlockedIncrement(&g_codecDumpCount);
+        SaveCodecDump("in", dumpSeq, channel, plain, plainLen);
+        if (keyCtx) {
+            SaveCodecDump("keyctx_plus10", dumpSeq, channel,
+                          (const BYTE*)((DWORD)(ULONG_PTR)keyCtx + 0x10), 40);
+            __try {
+                const BYTE* table = *(const BYTE**)keyCtx;
+                if (table) SaveCodecDump("keyctx_table", dumpSeq, channel, table, 160);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
     BOOL ok = g_origProudEncode(keyCtx, channel, outBuf, outCap, plain, plainLen);
     if (ok) {
-        LogCodecBytes("OUT", keyCtx, channel, outBuf, outCap, outCap);
+        LogCodecBytes("OUT", keyCtx, channel, outBuf, plainLen, outCap);
+        if (dumpSeq != 0 && outBuf && plainLen > 0 && plainLen <= outCap) {
+            SaveCodecDump("out", dumpSeq, channel, outBuf, plainLen);
+        }
     } else if (EnterHook()) {
         Log("[PNCODEC/OUT] encode returned FALSE");
         LeaveHook();
@@ -2848,6 +3629,68 @@ static void LogLobbyNetStateIfDue(const char* tag) {
     }
 }
 
+static void ForceFaz103NetUpdatePollIfPending() {
+    if (!g_imageBase || !g_requestLoginObserved) return;
+
+    DWORD now = GetTickCount();
+    DWORD last = g_lastFaz103PollTick;
+    if (last && (now - last) < 250) return;
+    g_lastFaz103PollTick = now;
+
+    DWORD app = 0, netObj = 0, proudClient = 0, bufObj = 0;
+    DWORD b8 = 0, bC = 0, pending = 0;
+    __try {
+        app = *(volatile DWORD*)0x12BAA04;
+        if (app) netObj = *(volatile DWORD*)(app + 0x28);
+        if (netObj) proudClient = *(volatile DWORD*)netObj;
+        if (proudClient) bufObj = *(volatile DWORD*)(proudClient + 0x25C + 1 * 4);
+        if (bufObj) {
+            b8 = *(volatile DWORD*)(bufObj + 0x08);
+            bC = *(volatile DWORD*)(bufObj + 0x0C);
+            if (b8 && bC >= b8) pending = bC - b8;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (!netObj || pending == 0 || pending > 0x2000) return;
+    LONG n = InterlockedIncrement(&g_faz103PollCallCount);
+    if (n > 12) return;
+
+    if (EnterHook()) {
+        char buf[220];
+        wsprintfA(buf, "FAZ103: forcing net update poll #%ld net=0x%08X proud=0x%08X pending=%lu",
+                  n, netObj, proudClient, pending);
+        Log(buf);
+        LeaveHook();
+    }
+
+#if defined(_M_IX86)
+    DWORD fn = (DWORD)(g_imageBase + 0x697C80); // 0xA97C80 net wrapper update/poll
+    __try {
+        __asm {
+            mov ecx, netObj
+            call fn
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (EnterHook()) { Log("FAZ103: exception while forcing net update poll"); LeaveHook(); }
+    }
+#endif
+
+    __try {
+        DWORD after8 = *(volatile DWORD*)(bufObj + 0x08);
+        DWORD afterC = *(volatile DWORD*)(bufObj + 0x0C);
+        DWORD afterPending = (afterC >= after8) ? (afterC - after8) : 0xFFFFFFFF;
+        if (EnterHook()) {
+            char buf[220];
+            wsprintfA(buf, "FAZ103: net update poll done #%ld before=%lu after=%lu",
+                      n, pending, afterPending);
+            Log(buf);
+            LeaveHook();
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static void PinError93LatchAfterLogin() {
     if (!FORCE_ERROR93_ONCE_LATCH || !g_requestLoginObserved) return;
     __try {
@@ -2861,9 +3704,10 @@ static void PinError93LatchAfterLogin() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     LogLobbyNetStateIfDue("post-requestlogin");
+    ForceFaz103NetUpdatePollIfPending();
 }
 
-static void __stdcall ProudRawSendEntryForceAfterOriginal(const BYTE* payload, int len,
+static BOOL __stdcall ProudRawSendEntryForceAfterOriginal(const BYTE* payload, int len,
                                                           DWORD esiVal, DWORD ediVal) {
     BOOL looksLikeConnectRequest = FALSE;
     __try {
@@ -2875,6 +3719,7 @@ static void __stdcall ProudRawSendEntryForceAfterOriginal(const BYTE* payload, i
 
     if (FORCE_LOCAL_CONNECT_SUCCESS && looksLikeConnectRequest &&
         InterlockedCompareExchange(&g_forcedConnectSuccess, 1, 0) == 0) {
+        BOOL forced = FALSE;
         BYTE pkt[32];
         ZeroMemory(pkt, sizeof(pkt));
         pkt[5] = 0; // key table index used by 0xA68560
@@ -2895,15 +3740,130 @@ static void __stdcall ProudRawSendEntryForceAfterOriginal(const BYTE* payload, i
                 mov eax, pktPtr
                 push wrapper
                 call fn
+                mov forced, 1
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             if (EnterHook()) { Log("[PNRAW/FORCE2] exception while invoking 0xA73CA0"); LeaveHook(); }
         }
 #endif
+        return forced;
     }
+    return FALSE;
 }
 
 #if defined(_M_IX86)
+static __declspec(naked) void HookedProudRecvPumpNaked() {
+    __asm {
+        pushfd
+        pushad
+
+        // 0xA69380 is called as: EAX=slot, [esp+4]=manager.
+        // After pushfd+pushad: saved EAX is [esp+28], original arg1 is [esp+40].
+        mov eax, [esp + 28]
+        mov ecx, [esp + 40]
+        push 0
+        push eax
+        push ecx
+        call LogFaz100RecvPump
+
+        popad
+        popfd
+
+        // Preserve the caller's original stack/argument and call the trampoline
+        // with a copied manager argument. The original callee does `ret 4`.
+        push eax
+        mov ecx, [esp + 8]
+        push ecx
+        call dword ptr [g_origProudRecvPump]
+
+        pushfd
+        pushad
+        mov eax, [esp + 36]   // saved slot from before the original call
+        mov ecx, [esp + 44]   // original manager arg
+        push 1
+        push eax
+        push ecx
+        call LogFaz100RecvPump
+        popad
+        popfd
+
+        add esp, 4            // drop saved slot
+        ret 4                 // return to original caller, clean original manager arg
+    }
+}
+
+static __declspec(naked) int HookedProudReadPollNaked() {
+    __asm {
+        // 0xA68FB0 is called as: ESI=manager, [esp+4]=out stream.
+        // The original callee returns with `ret 4`.
+        mov eax, [esp + 4]
+        push eax
+        call dword ptr [g_origProudReadPoll]
+
+        push eax
+        pushfd
+        pushad
+
+        mov ecx, [esp + 4]    // saved ESI = manager
+        mov edx, [esp + 44]   // original out stream arg
+        mov eax, [esp + 36]   // original return value
+        push eax
+        push edx
+        push ecx
+        call LogFaz101ReadPoll
+
+        popad
+        popfd
+        pop eax
+        ret 4
+    }
+}
+
+static __declspec(naked) int HookedProudReadPacketNaked() {
+    __asm {
+        // 0xA68960 is called as: EDI=slot, [esp+4]=manager, [esp+8]=out stream.
+        pushfd
+        pushad
+        mov eax, [esp]        // saved EDI = slot
+        mov ecx, [esp + 40]   // manager arg
+        mov edx, [esp + 44]   // out stream arg
+        push 0
+        push 0
+        push edx
+        push eax
+        push ecx
+        call LogFaz101ReadPacket
+        popad
+        popfd
+
+        mov eax, [esp + 8]
+        mov ecx, [esp + 4]
+        push eax
+        push ecx
+        call dword ptr [g_origProudReadPacket]
+
+        push eax
+        pushfd
+        pushad
+
+        mov eax, [esp]        // saved EDI = slot
+        mov ecx, [esp + 44]   // original manager arg
+        mov edx, [esp + 48]   // original out stream arg
+        mov ebx, [esp + 36]   // original return value
+        push 1
+        push ebx
+        push edx
+        push eax
+        push ecx
+        call LogFaz101ReadPacket
+
+        popad
+        popfd
+        pop eax
+        ret 8
+    }
+}
+
 static __declspec(naked) int HookedProudRawSendEntryNaked() {
     __asm {
         pushfd
@@ -2921,6 +3881,8 @@ static __declspec(naked) int HookedProudRawSendEntryNaked() {
         push ecx
         push eax
         call ProudRawSendEntryProbe
+
+call_original_raw_send:
 
         popad
         popfd
@@ -3032,6 +3994,11 @@ static int __stdcall HookedProudSendWrapper(void* netObj, int slot, const BYTE* 
         __try {
             char hex[3 * 96 + 1];
             FormatHexPrefix(payload, len, hex, sizeof(hex));
+            char keyHex[3 * 40 + 8];
+            keyHex[0] = 0;
+            if (netObj && InterlockedCompareExchange(&g_proudKeyDumpCount, 1, 0) == 0) {
+                FormatHexPrefix((const BYTE*)((DWORD)(ULONG_PTR)netObj + 0x10), 40, keyHex, sizeof(keyHex));
+            }
             void* ra = _ReturnAddress();
             DWORD rva = 0;
             if (g_imageBase && (DWORD)(ULONG_PTR)ra >= (DWORD)(ULONG_PTR)g_imageBase) {
@@ -3047,6 +4014,11 @@ static int __stdcall HookedProudSendWrapper(void* netObj, int slot, const BYTE* 
             wsprintfA(buf, "[PNSENDWRAP] caller=0x%p rva=0x%X net=0x%p slot=%d esi=0x%08X edi=0x%08X len=%d bytes=%s",
                       ra, rva, netObj, slot, esiVal, ediVal, len, hex);
             Log(buf);
+            if (keyHex[0]) {
+                wsprintfA(buf, "FAZ81: ProudNet key table candidate net+0x10 net=0x%p key40=%s",
+                          netObj, keyHex);
+                Log(buf);
+            }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             Log("[PNSENDWRAP] exception while formatting bytes");
         }
@@ -3070,12 +4042,295 @@ static void InitProudNetRawSendHook() {
     wsprintfA(buf, "InitProudNetRawSendHook: raw-entry 0xA69940 @0x%p status=%d", pRaw, s);
     Log(buf);
 
+#if defined(_M_IX86)
+    PVOID pRecvPump = (PVOID)(g_imageBase + 0x669380); // VA 0xA69380 native TCP recv pump
+    s = MH_CreateHook(pRecvPump, (LPVOID)&HookedProudRecvPumpNaked,
+                      (LPVOID*)&g_origProudRecvPump);
+    if (s == MH_OK) s = MH_EnableHook(pRecvPump);
+    wsprintfA(buf, "InitFaz100RecvPumpHook: recv-pump 0xA69380 @0x%p status=%d",
+              pRecvPump, s);
+    Log(buf);
+
+    PVOID pReadPoll = (PVOID)(g_imageBase + 0x668FB0); // VA 0xA68FB0 inbound packet poll
+    s = MH_CreateHook(pReadPoll, (LPVOID)&HookedProudReadPollNaked,
+                      (LPVOID*)&g_origProudReadPoll);
+    if (s == MH_OK) s = MH_EnableHook(pReadPoll);
+    wsprintfA(buf, "InitFaz101ReadPollHook: read-poll 0xA68FB0 @0x%p status=%d",
+              pReadPoll, s);
+    Log(buf);
+
+    PVOID pReadPacket = (PVOID)(g_imageBase + 0x668960); // VA 0xA68960 inbound packet reader
+    s = MH_CreateHook(pReadPacket, (LPVOID)&HookedProudReadPacketNaked,
+                      (LPVOID*)&g_origProudReadPacket);
+    if (s == MH_OK) s = MH_EnableHook(pReadPacket);
+    wsprintfA(buf, "InitFaz101ReadPacketHook: read-packet 0xA68960 @0x%p status=%d",
+              pReadPacket, s);
+    Log(buf);
+#endif
+
     PVOID pSendWrapper = (PVOID)(g_imageBase + 0x669790); // VA 0xA69790 lower outbound send wrapper
     s = MH_CreateHook(pSendWrapper, (LPVOID)&HookedProudSendWrapper,
                       (LPVOID*)&g_origProudSendWrapper);
     if (s == MH_OK) s = MH_EnableHook(pSendWrapper);
     wsprintfA(buf, "InitProudNetRawSendHook: send-wrapper 0xA69790 @0x%p status=%d", pSendWrapper, s);
     Log(buf);
+}
+
+static BOOL IsFaz89TacticUpdateError(int msgId) {
+    return (msgId >= 10023 && msgId <= 10026) ||
+           msgId == 17521 ||
+           msgId == 17564; // "Team info is not normal" fake-session exit gate
+}
+
+static void RefreshFaz95TeamBootstrapOnValidationMsg(int msgId) {
+    if (!IsFaz89TacticUpdateError(msgId)) return;
+    DWORD teamManager = g_faz82LastTeamManager;
+    if (teamManager) {
+        AttachFaz82StarterTeamModel(teamManager, "validation-msg");
+    } else {
+        EnsureFaz82StarterTeamModel();
+    }
+}
+
+static int __stdcall ShouldSuppressFaz91FlashMsg(int msgId, DWORD retAddr, DWORD esiVal) {
+    BOOL suppress = IsFaz89TacticUpdateError(msgId);
+    if (suppress) RefreshFaz95TeamBootstrapOnValidationMsg(msgId);
+    static volatile LONG s_seen = 0;
+    LONG n = InterlockedIncrement(&s_seen);
+    if ((suppress || n <= 80) && EnterHook()) {
+        char buf[260];
+        wsprintfA(buf,
+                  "FAZ91: flash-msg helper id=%d esi=0x%08X ret=0x%08X suppress=%d (hit=%ld)",
+                  msgId, esiVal, retAddr, suppress ? 1 : 0, n);
+        Log(buf);
+        LeaveHook();
+    }
+    return suppress ? 1 : 0;
+}
+
+static BOOL IsFaz97TeamUiModalCallsite(DWORD retAddr) {
+    if (!g_imageBase || !retAddr) return FALSE;
+    DWORD rva = retAddr - (DWORD)(ULONG_PTR)g_imageBase;
+
+    // B82790 is the id-based Flash message helper. The wider B7..C4 range is
+    // where Team/Tactic/Card pane validation callsites live in the current RE
+    // notes. Gate on g_faz82LastTeamManager so normal login/lobby modals are
+    // left alone until our fake Team bootstrap is actually active.
+    if (rva == 0x782802) return TRUE; // call 0xB81EB0 return inside B82790
+    return (rva >= 0x770000 && rva <= 0x840000);
+}
+
+static int __stdcall ShouldSuppressFaz97UiModal(DWORD retAddr, DWORD titlePtr,
+                                                DWORD msgPtr, DWORD floatBits) {
+    BOOL teamActive = (g_faz82LastTeamManager != 0);
+    BOOL suppress = teamActive && IsFaz97TeamUiModalCallsite(retAddr);
+    if (suppress) RefreshFaz95TeamBootstrapOnValidationMsg(17564);
+
+    static volatile LONG s_seen = 0;
+    LONG n = InterlockedIncrement(&s_seen);
+    if ((suppress || n <= 100) && EnterHook()) {
+        char title[96];
+        char msg[160];
+        WideToAnsiLog((LPCWSTR)titlePtr, title, sizeof(title));
+        WideToAnsiLog((LPCWSTR)msgPtr, msg, sizeof(msg));
+        DWORD rva = (g_imageBase && retAddr >= (DWORD)(ULONG_PTR)g_imageBase)
+                    ? retAddr - (DWORD)(ULONG_PTR)g_imageBase : retAddr;
+        char buf[520];
+        wsprintfA(buf,
+                  "FAZ97: ui-modal ret=0x%08X rva=0x%X title='%s' msg='%s' f=0x%08X team=0x%08X suppress=%d (hit=%ld)",
+                  retAddr, rva, title, msg, floatBits, g_faz82LastTeamManager,
+                  suppress ? 1 : 0, n);
+        Log(buf);
+        LeaveHook();
+    }
+    return suppress ? 1 : 0;
+}
+
+static int __stdcall ShouldSuppressFaz98SimpleModal(DWORD retAddr, DWORD msgPtr,
+                                                    DWORD kind, DWORD arg2,
+                                                    DWORD arg3, DWORD floatBits) {
+    BOOL teamActive = (g_faz82LastTeamManager != 0);
+    BOOL suppress = teamActive && IsFaz97TeamUiModalCallsite(retAddr);
+    if (suppress) RefreshFaz95TeamBootstrapOnValidationMsg(17564);
+
+    static volatile LONG s_seen = 0;
+    LONG n = InterlockedIncrement(&s_seen);
+    if ((suppress || n <= 100) && EnterHook()) {
+        char msg[180];
+        WideToAnsiLog((LPCWSTR)msgPtr, msg, sizeof(msg));
+        DWORD rva = (g_imageBase && retAddr >= (DWORD)(ULONG_PTR)g_imageBase)
+                    ? retAddr - (DWORD)(ULONG_PTR)g_imageBase : retAddr;
+        char buf[560];
+        wsprintfA(buf,
+                  "FAZ98: simple-modal ret=0x%08X rva=0x%X msg='%s' kind=0x%08X arg2=0x%08X arg3=0x%08X f=0x%08X team=0x%08X suppress=%d (hit=%ld)",
+                  retAddr, rva, msg, kind, arg2, arg3, floatBits,
+                  g_faz82LastTeamManager, suppress ? 1 : 0, n);
+        Log(buf);
+        LeaveHook();
+    }
+    return suppress ? 1 : 0;
+}
+
+#if defined(_M_IX86)
+static __declspec(naked) void HookedFlashMsgShowNaked() {
+    __asm {
+        pushfd
+        pushad
+
+        // After pushfd+pushad: saved ESI is [esp+4], saved EDX is [esp+20],
+        // original caller return address is [esp+36].
+        mov eax, [esp + 36]
+        mov ecx, [esp + 4]
+        mov edx, [esp + 20]
+        push ecx
+        push eax
+        push edx
+        call ShouldSuppressFaz91FlashMsg
+        test eax, eax
+        jnz suppress_msg
+
+        popad
+        popfd
+        jmp dword ptr [g_origFlashMsgShow]
+
+    suppress_msg:
+        popad
+        popfd
+        ret
+    }
+}
+
+static __declspec(naked) void HookedUiModalShowNaked() {
+    __asm {
+        pushfd
+        pushad
+
+        // 0xB81EB0 is __thiscall-ish:
+        //   ECX = wide title/channel string
+        //   [esp+4] = wide message string
+        //   [esp+8] = float/z-order bits
+        // After pushfd+pushad: saved ECX is [esp+24], original return is
+        // [esp+36], arg1 is [esp+40], arg2 is [esp+44].
+        mov eax, [esp + 36]
+        mov ecx, [esp + 24]
+        mov edx, [esp + 40]
+        mov ebx, [esp + 44]
+        push ebx
+        push edx
+        push ecx
+        push eax
+        call ShouldSuppressFaz97UiModal
+        test eax, eax
+        jnz suppress_modal
+
+        popad
+        popfd
+        jmp dword ptr [g_origUiModalShow]
+
+    suppress_modal:
+        popad
+        popfd
+        ret
+    }
+}
+
+static __declspec(naked) void HookedSimpleModalShowNaked() {
+    __asm {
+        pushfd
+        pushad
+
+        // 0xB81FA0 is __thiscall-ish:
+        //   ECX = wide message text
+        //   [esp+4]  = kind/buttons
+        //   [esp+8]  = payload/callback object
+        //   [esp+12] = callback/vtable-ish pointer
+        //   [esp+16] = float/z-order bits
+        // After pushfd+pushad: saved ECX is [esp+24], return is [esp+36],
+        // args are [esp+40..52].
+        mov eax, [esp + 36]
+        mov ecx, [esp + 24]
+        mov edx, [esp + 40]
+        mov ebx, [esp + 44]
+        mov esi, [esp + 48]
+        mov edi, [esp + 52]
+        push edi
+        push esi
+        push ebx
+        push edx
+        push ecx
+        push eax
+        call ShouldSuppressFaz98SimpleModal
+        test eax, eax
+        jnz suppress_simple_modal
+
+        popad
+        popfd
+        jmp dword ptr [g_origSimpleModalShow]
+
+    suppress_simple_modal:
+        popad
+        popfd
+        ret
+    }
+}
+#endif
+
+static void __stdcall HookedSystemMsgShow(void* mgr, int msgId) {
+    if (IsFaz89TacticUpdateError(msgId)) {
+        RefreshFaz95TeamBootstrapOnValidationMsg(msgId);
+        static volatile LONG s_suppressed = 0;
+        LONG n = InterlockedIncrement(&s_suppressed);
+        if (n <= 30 && EnterHook()) {
+            char buf[220];
+            wsprintfA(buf,
+                      "FAZ89: suppressed tactic/formation system msg id=%d mgr=0x%p (hit=%ld)",
+                      msgId, mgr, n);
+            Log(buf);
+            LeaveHook();
+        }
+        return;
+    }
+    g_origSystemMsgShow(mgr, msgId);
+}
+
+static void InitFaz89SystemMsgFilter() {
+    if (!g_imageBase) { Log("InitFaz89SystemMsgFilter: image base missing"); return; }
+    PVOID pShow = (PVOID)(g_imageBase + SYSTEM_MSG_SHOW_RVA);
+    MH_STATUS s = MH_CreateHook(pShow, (LPVOID)&HookedSystemMsgShow,
+                                (LPVOID*)&g_origSystemMsgShow);
+    if (s == MH_OK) s = MH_EnableHook(pShow);
+    char buf[220];
+    wsprintfA(buf, "InitFaz89SystemMsgFilter: system-msg 0xA617E0 @0x%p status=%d",
+              pShow, s);
+    Log(buf);
+
+    PVOID pFlash = (PVOID)(g_imageBase + FLASH_MSG_SHOW_RVA);
+#if defined(_M_IX86)
+    s = MH_CreateHook(pFlash, (LPVOID)&HookedFlashMsgShowNaked,
+                      (LPVOID*)&g_origFlashMsgShow);
+    if (s == MH_OK) s = MH_EnableHook(pFlash);
+    wsprintfA(buf, "InitFaz91FlashMsgFilter: flash-msg 0xB82790 @0x%p status=%d",
+              pFlash, s);
+    Log(buf);
+
+    PVOID pUiModal = (PVOID)(g_imageBase + UI_MODAL_SHOW_RVA);
+    s = MH_CreateHook(pUiModal, (LPVOID)&HookedUiModalShowNaked,
+                      (LPVOID*)&g_origUiModalShow);
+    if (s == MH_OK) s = MH_EnableHook(pUiModal);
+    wsprintfA(buf, "InitFaz97UiModalFilter: ui-modal 0xB81EB0 @0x%p status=%d",
+              pUiModal, s);
+    Log(buf);
+
+    PVOID pSimpleModal = (PVOID)(g_imageBase + SIMPLE_MODAL_SHOW_RVA);
+    s = MH_CreateHook(pSimpleModal, (LPVOID)&HookedSimpleModalShowNaked,
+                      (LPVOID*)&g_origSimpleModalShow);
+    if (s == MH_OK) s = MH_EnableHook(pSimpleModal);
+    wsprintfA(buf, "InitFaz98SimpleModalFilter: simple-modal 0xB81FA0 @0x%p status=%d",
+              pSimpleModal, s);
+    Log(buf);
+#else
+    Log("InitFaz91FlashMsgFilter: skipped on non-x86 build");
+#endif
 }
 
 // ============================================================================
@@ -3399,6 +4654,7 @@ DWORD WINAPI PatchThread(LPVOID lpParam) {
         Log("FAZ72: ProudNet codec hook disabled; raw/send-wrapper/netlog only");
     }
     InitProudNetRawSendHook(); // FAZ59: log generated-RMI caller + raw payload
+    InitFaz89SystemMsgFilter(); // FAZ89: suppress fake-session tactic save error popups
     if (ENABLE_VIZ_LOGIN_DIAG) {
         InitVizLoginHooks(); // FAZ67: capture Viz/S2C object and NotifyLoginOk dispatcher calls
         ScanVizClientObjects();
@@ -3663,30 +4919,33 @@ DWORD WINAPI PatchThread(LPVOID lpParam) {
         // leaves that critsec half-initialized. All Themida/GG HW-BP bypasses
         // (val/ggr) fire long BEFORE GG-ready, so we no longer need the loop.
         if (g_ggReadySignaled) {
-            // FAZ53: FAZ52 proved the LoginPane gate opens and reaches the
-            // loader. Now spend the limited DR slots on the return/branch points:
-            //   0xD75D6D = right after call 0xD75A40, AL is loader success flag
-            //   0xD75D99 = failure side
-            //   0xD75D9E = success side
-            // Keep the GG result patch (DR2, ggr) so GG stability is unchanged.
-            DWORD uiRetVA   = (DWORD)(g_imageBase + 0x975D6D);  // after loader call, AL=result
-            DWORD uiFailVA  = (DWORD)(g_imageBase + 0x975D99);  // loader fail path
-            DWORD uiOkVA    = (DWORD)(g_imageBase + 0x975D9E);  // loader success path
-            DWORD ggrVA     = (DWORD)(g_imageBase + GG_RESULT_PATCH_RVA);
+            // FAZ79: spend the limited DR slots on the inbound S2C dispatcher
+            // hook so we can identify the opcode that populates the
+            // profile/team/card/roster model. The gray-screen/UI-loader (FAZ53)
+            // and Team-tab (FAZ77) paths now work, so those diag BPs are freed.
+            //   DR0 = 0x54AAEE  dispatcher A jmp [idx*4+table]  (PRE snapshot + identity)
+            //   DR1 = 0x568A42  generic u16 reader store        (full opcode timeline)
+            //   DR2 = ggr 0xD35379                              (GG stability, unchanged)
+            //   DR3 = 0x54E932  dispatcher A SEH epilogue        (POST snapshot + diff)
+            DWORD dispJmpVA = (DWORD)(g_imageBase + FAZ79_DISPA_JMP_RVA);    // DR0
+            DWORD readerVA  = (DWORD)(g_imageBase + FAZ79_READER_STORE_RVA); // DR1
+            DWORD ggrVA     = (DWORD)(g_imageBase + GG_RESULT_PATCH_RVA);    // DR2
+            DWORD dispEpiVA = (DWORD)(g_imageBase + FAZ79_DISPA_EPI_RVA);    // DR3
             if (!threadsFrozen) {
                 Log("FAZ23: GG-ready -> ceasing ALL thread suspension (let d3d9 init run clean)");
                 threadsFrozen = TRUE;
                 ggReadyTick = GetTickCount();
-                int n = SetHardwareBreakpointAllThreads(uiRetVA, uiFailVA, ggrVA, uiOkVA);
-                wsprintfA(buf, "FAZ53: armed UI-loader result BPs ret=0x%X fail=0x%X ok=0x%X (+ggr DR2) on %d threads",
-                          uiRetVA, uiFailVA, uiOkVA, n);
+                int n = SetHardwareBreakpointAllThreads(dispJmpVA, readerVA, ggrVA, dispEpiVA);
+                wsprintfA(buf, "FAZ79: armed S2C dispatcher BPs dispA=0x%X reader=0x%X epi=0x%X (+ggr DR2) on %d threads",
+                          dispJmpVA, readerVA, dispEpiVA, n);
                 Log(buf);
                 diagArmed = TRUE;
             }
-            // Re-arm continuously (after 1500ms, past d3d9 init) so threads spawned
-            // after the initial arming also get the BPs (DR regs aren't inherited).
+            // Re-arm continuously (after 1500ms, past d3d9 init) so the ProudNet
+            // worker / network threads spawned after the initial arming also get
+            // the BPs (DR regs aren't inherited across thread creation).
             if ((GetTickCount() - ggReadyTick) > 1500) {
-                SetHardwareBreakpointAllThreads(uiRetVA, uiFailVA, ggrVA, uiOkVA);
+                SetHardwareBreakpointAllThreads(dispJmpVA, readerVA, ggrVA, dispEpiVA);
             }
             // FAZ49: periodic thread-EIP/ESP/retaddr dump on the gray screen to see
             // WHERE main/render threads are parked (message loop / network wait /
