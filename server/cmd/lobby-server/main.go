@@ -94,7 +94,7 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		if err != nil {
 			log.Error("Lobby name error!")
 		}
-		lobbyMap.lobbies[lobbyName] = types.Lobby{LobbyIP: string(c.HostID), LobbyPort: 2272, LobbyName: lobbyName, IsGameFull: false, IsMatchStarted: false}
+		lobbyMap.lobbies[lobbyName] = types.Lobby{LobbyID: int32(len(lobbyMap.lobbies)), LobbyName: lobbyName, IsGameFull: false, IsMatchStarted: false}
 		var lobbyResponse = func() *proudnet.Message {
 			resp := proudnet.NewMessage()
 			resp.WriteString(lobbyName)
@@ -115,8 +115,7 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		// TODO test multiple lobbies
 		for _, lobby := range lobbyMap.lobbies {
 			res.WriteString(lobby.LobbyName)
-			res.WriteString(lobby.LobbyIP)
-			res.WriteInt32(lobby.LobbyPort)
+			res.WriteInt32(lobby.LobbyID)
 			res.WriteInt32(lobby.GamerCount)
 			c.Send(proudnet.EntryS2C_LobbyList_Add, res)
 		}
@@ -136,15 +135,32 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 				var room = func() *proudnet.Message {
 					resp := proudnet.NewMessage()
 					resp.WriteString(lobby.LobbyName)
-					resp.WriteString(lobby.LobbyIP)
-					resp.WriteInt32(lobby.LobbyPort)
+					resp.WriteInt32(lobby.LobbyID)
 					return resp
 				}
-				s.Broadcast(proudnet.LobbyS2C_GameRoom_Disappear, room)
-				return c.Send(proudnet.LobbyS2C_NotifyJoinRoomSuccess, room())
+				c.Send(proudnet.LobbyS2C_NotifyJoinRoomSuccess, room())
+				lobby.GamerCount += 1
+				lobby.Players[c.HostID] = c
+				if lobby.GamerCount == 2 {
+					s.Broadcast(proudnet.LobbyS2C_GameRoom_Disappear, room)
+					go handleStartGame(lobby)
+				}
 			}
 		}
 		res := proudnet.NewMessage()
-		return c.Send(proudnet.LobbyS2C_NotifyJoinRoomFailed, res)
+		c.Send(proudnet.LobbyS2C_NotifyJoinRoomFailed, res)
+		return nil
 	})
+}
+
+func handleStartGame(lobby types.Lobby) {
+	for _, player := range lobby.Players {
+		resp := proudnet.NewMessage()
+		resp.WriteString("127.0.0.1")
+		resp.WriteInt32(2272)
+		// Placeholders
+		resp.WriteInt32(lobby.LobbyID)
+		resp.WriteString("credentials_")
+		player.Send(proudnet.LobbyS2C_GotoGameRoom, resp)
+	}
 }

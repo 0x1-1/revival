@@ -77,9 +77,19 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		credential := makeFakeGuid("credential_" + gamerID)
 		resp.WriteBytes(gamerGuid)
 		resp.WriteBytes(credential)
-		return c.Send(proudnet.EntryS2C_NotifyFirstLogonSuccess, resp)
+
+		// We sending our player to lobby server
+		lobby := proudnet.NewMessage()
+		lobby.WriteString("127.0.0.1")
+		lobby.WriteInt32(2271)
+		lobby.WriteBytes(gamerGuid)
+		lobby.WriteBytes(credential)
+		// Probably a success popup
+		c.Send(proudnet.EntryS2C_NotifyFirstLogonSuccess, resp)
+		return c.Send(proudnet.EntryS2C_GotoLobby, lobby)
 	})
 
+	// Wrong server???
 	// EntryC2S.RequestHeroSlots -- return a dummy hero list
 	s.Handle(proudnet.EntryC2S_RequestHeroSlots, func(c *proudnet.Conn, body *proudnet.Message) error {
 		// HeroList_Begin
