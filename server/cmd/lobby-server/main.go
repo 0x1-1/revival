@@ -95,11 +95,16 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 			log.Error("Lobby name error!")
 		}
 		lobbyMap.lobbies[lobbyName] = types.Lobby{LobbyIP: string(c.HostID), LobbyPort: 2272, LobbyName: lobbyName, IsGameFull: false, IsMatchStarted: false}
-		resp := proudnet.NewMessage()
-		resp.WriteString(lobbyName)        // room name
-		resp.WriteString(string(c.HostID)) // battle server
-		resp.WriteInt32(2272)              // port
-		return c.Send(proudnet.LobbyS2C_NotifyCreateRoomSuccess, resp)
+		var lobbyResponse = func() *proudnet.Message {
+			resp := proudnet.NewMessage()
+			resp.WriteString(lobbyName)
+			resp.WriteString(string(c.HostID))
+			resp.WriteInt32(2272)
+			return resp
+		}
+		// Broadcast to all players we have a new game room
+		s.Broadcast(proudnet.LobbyS2C_GameRoom_Appear, lobbyResponse)
+		return c.Send(proudnet.LobbyS2C_NotifyCreateRoomSuccess, lobbyResponse())
 	})
 
 	// EntryC2S.RequestLobbyList -- return one lobby pointing at 127.0.0.1:2271
@@ -113,8 +118,8 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 			res.WriteString(lobby.LobbyIP)
 			res.WriteInt32(lobby.LobbyPort)
 			res.WriteInt32(lobby.GamerCount)
+			c.Send(proudnet.EntryS2C_LobbyList_Add, res)
 		}
-		c.Send(proudnet.EntryS2C_LobbyList_Add, res)
 		return c.Send(proudnet.EntryS2C_LobbyList_End, proudnet.NewMessage())
 	})
 
@@ -125,14 +130,18 @@ func registerHandlers(s *proudnet.Server, log *slog.Logger) {
 		if err != nil {
 			log.Error("Join request error")
 		}
-
+		// TODO store game room owner so they cannot join their room again.
 		if lobby, ok := lobbyMap.lobbies[lobbyName]; ok {
 			if lobby.GamerCount < 2 && !lobby.IsMatchStarted {
-				res := proudnet.NewMessage()
-				res.WriteString(lobby.LobbyName)
-				res.WriteString(lobby.LobbyIP)
-				res.WriteInt32(lobby.LobbyPort)
-				return c.Send(proudnet.LobbyS2C_NotifyJoinRoomSuccess, res)
+				var room = func() *proudnet.Message {
+					resp := proudnet.NewMessage()
+					resp.WriteString(lobby.LobbyName)
+					resp.WriteString(lobby.LobbyIP)
+					resp.WriteInt32(lobby.LobbyPort)
+					return resp
+				}
+				s.Broadcast(proudnet.LobbyS2C_GameRoom_Disappear, room)
+				return c.Send(proudnet.LobbyS2C_NotifyJoinRoomSuccess, room())
 			}
 		}
 		res := proudnet.NewMessage()
