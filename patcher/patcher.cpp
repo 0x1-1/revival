@@ -2988,15 +2988,16 @@ DWORD WINAPI PatchThread(LPVOID lpParam) {
 }
 
 // DLL'in disk uzerindeki yolundan log dosyasinin yolunu hesaplar.
-// Patcher su yapida bulunuyor: <repo>/src/patcher/revival_patcher.dll
+// Patcher su yapida bulunuyor: <repo>/patcher/revival_patcher.dll
 // Log dosyasini repo'nun kokune koyariz: <repo>/patcher.log
 static void ResolveLogPath(HMODULE hModule) {
     if (!GetModuleFileNameA(hModule, SELF_DLL_PATH, MAX_PATH)) return;
     // Once SELF_DLL_PATH'i kendi path'ine kopyaladik. Simdi log icin
-    // ondan turetiyoruz: dirname -> dirname -> dirname + "\\patcher.log".
+    // ondan turetiyoruz: dirname (patcher/) -> dirname (repo koku) +
+    // "\\patcher.log".
     char tmp[MAX_PATH];
     lstrcpynA(tmp, SELF_DLL_PATH, MAX_PATH);
-    for (int up = 0; up < 3; up++) {
+    for (int up = 0; up < 2; up++) {
         char* slash = (char*)strrchr(tmp, '\\');
         if (!slash) break;
         *slash = 0;

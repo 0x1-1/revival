@@ -32,7 +32,7 @@ Studio 2022 Build Tools yüklü olmalı (`BUILD.md` içinde detay).
 Joygame'in eski Goley installer'ını elinizde tutuyorsanız:
 
 ```bat
-src\tool\revival_tool.exe init "C:\Users\siz\Downloads\GoleySetup.exe"
+tool\revival_tool.exe init "C:\Users\siz\Downloads\GoleySetup.exe"
 ```
 
 Tool sırayla:
@@ -45,7 +45,7 @@ Goley'i farklı bir klasöre kurduysanız:
 
 ```bat
 set GOLEY_INSTALL_DIR=D:\Oyunlar\Goley\BinaryTr
-src\tool\revival_tool.exe init "C:\Users\siz\Downloads\GoleySetup.exe"
+tool\revival_tool.exe init "C:\Users\siz\Downloads\GoleySetup.exe"
 ```
 
 Bu environment variable kalıcı değil; her oturumda set etmek lazım
@@ -54,7 +54,7 @@ veya kalıcı yapmak istiyorsanız `setx` kullanın.
 ### 3) Oyunu başlat
 
 ```bat
-src\tool\revival_tool.exe launch
+tool\revival_tool.exe launch
 ```
 
 Goley_.exe açılır, DLL inject edilir, Themida bypass devreye girer.
@@ -100,10 +100,10 @@ VLH/VLD çiftleri (karakterler, stadyumlar, çeviriler) için:
 pip install unicorn
 
 :: Tüm data klasörünü bir kerede aç:
-src\tool\revival_tool.exe extract
+tool\revival_tool.exe extract
 
 :: Veya tek bir çifti:
-src\tool\revival_tool.exe extract "C:\Joygame\Goley\Data\Character.VLH" "C:\Joygame\Goley\Data\Character.VLD"
+tool\revival_tool.exe extract "C:\Joygame\Goley\Data\Character.VLH" "C:\Joygame\Goley\Data\Character.VLD"
 ```
 
 Çıktılar `extracted/character/`, `extracted/stadium/`, vs. altında
@@ -118,7 +118,7 @@ hangi thread'in nerede beklediğini görmek lazım:
 tasklist | findstr /i goley_
 :: Goley_.exe için PID'i alın (mesela 12345)
 
-src\tool\revival_tool.exe dump-threads 12345
+tool\revival_tool.exe dump-threads 12345
 ```
 
 Çıktı her thread'in EIP'sini hangi modülde olduğu ile beraber yazar:
@@ -138,9 +138,9 @@ Normal şartlarda elle dokunmanıza gerek yok; `init` ve `launch`
 otomatik ayarlar. Ama isterseniz:
 
 ```bat
-src\tool\revival_tool.exe ifeo show     :: mevcut değer
-src\tool\revival_tool.exe ifeo set      :: revival_wrapper'i kaydet
-src\tool\revival_tool.exe ifeo clear    :: kaldır
+tool\revival_tool.exe ifeo show     :: mevcut değer
+tool\revival_tool.exe ifeo set      :: revival_wrapper'i kaydet
+tool\revival_tool.exe ifeo clear    :: kaldır
 ```
 
 IFEO neden gerek: nProtect'in "trusted re-launch" davranışı var,
@@ -157,11 +157,11 @@ ettiyseniz ya da dışarıdan getirdiyseniz), DLL inject etmeden de
 nProtect'i atlatabilirsiniz:
 
 ```bat
-src\tool\revival_tool.exe patch ^
+tool\revival_tool.exe patch ^
     "C:\Joygame\Goley\BinaryTr\unpacked_Goley_.exe" ^
     "C:\Joygame\Goley\BinaryTr\unpacked_Goley_PATCHED.exe"
 
-src\tool\revival_tool.exe launch-unpacked
+tool\revival_tool.exe launch-unpacked
 ```
 
 Bu yöntemde `patches.json` içindeki kayıtlı patch'ler (şu an iki tane)
@@ -174,7 +174,7 @@ Bir şey ters gitti, Goley_ Task Manager'dan öldürülmüyor (admin
 process), wrapper kalmış falan:
 
 ```bat
-src\tool\revival_tool.exe cleanup
+tool\revival_tool.exe cleanup
 ```
 
 Bu komut idempotent: tüm Goley_/wrapper PID'lerini bulup öldürür,
@@ -188,10 +188,10 @@ Repo'yu klonladınız, hiçbir şey çalıştırmadınız, doğru çalışıp
 
 ```bat
 build_all.bat                                  :: hata vermesin
-src\tool\revival_tool.exe ping                   :: => ok
-src\tool\revival_tool.exe help                   :: tüm komutlar listelenir
-src\tool\revival_tool.exe ifeo show              :: IFEO durumu (yoksa "yok" yazar)
-src\tool\revival_tool.exe cleanup                :: idempotent, hiçbir şey kırılmaz
+tool\revival_tool.exe ping                   :: => ok
+tool\revival_tool.exe help                   :: tüm komutlar listelenir
+tool\revival_tool.exe ifeo show              :: IFEO durumu (yoksa "yok" yazar)
+tool\revival_tool.exe cleanup                :: idempotent, hiçbir şey kırılmaz
 ```
 
 Bu dördü de sorunsuz geçtiyse, build ortamıyla bir sorun yok. Sırada

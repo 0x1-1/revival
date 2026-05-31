@@ -50,7 +50,7 @@ seçin:
 
 ## Bileşenler
 
-### revival_tool.exe (`src/tool/`)
+### revival_tool.exe (`tool/`)
 
 32-bit konsol binary'si. Tek noktadan tüm iş akışını sürür. Komutları
 README'de tablo halinde.
@@ -65,7 +65,7 @@ Hardcoded yol yok. Tool kendi yolunu (`GetModuleFileNameA`) ile
 kurulum yolu için `GOLEY_INSTALL_DIR` environment variable'ı destekli
 (varsayılan `C:\Joygame\Goley\BinaryTr`).
 
-### revival_patcher.dll (`src/patcher/`)
+### revival_patcher.dll (`patcher/`)
 
 Goley_.exe'ye inject edilen DLL. `DllMain DLL_PROCESS_ATTACH` içinde
 inline armor kurar, ardından PatchThread'i async olarak başlatır.
@@ -89,7 +89,7 @@ içinde değildir.
 DLL kendi yolunu DllMain'de `GetModuleFileNameA` ile öğrenir,
 log dosyasını repo köküne yazar (`<repo>\patcher.log`).
 
-### revival_wrapper.exe (`src/wrapper/`)
+### revival_wrapper.exe (`wrapper/`)
 
 `Goley_.exe` için IFEO `Debugger` kaydı olarak set edilir. Windows
 her `CreateProcess(Goley_)` çağrısını şu şekilde çevirir:
@@ -116,7 +116,7 @@ kullanıp hemen `DebugActiveProcessStop` ile detach yapar; OS bizi
 Wrapper kendi yolundan DLL ve log path'lerini hesaplar. Yine
 hardcoded yol yok.
 
-### apply_patches.py (`src/tool/`)
+### apply_patches.py (`tool/`)
 
 Standalone Python script'i. IDA Pro gerektirmez.
 
@@ -128,7 +128,7 @@ Standalone Python script'i. IDA Pro gerektirmez.
 
 `revival_tool patch <in> <out>` arka planda bunu çağırıyor.
 
-### decrypt.py (`src/extract/`)
+### decrypt.py (`extract/`)
 
 Anipark'ın custom cipher'ını Unicorn x86 emulator'ünde çalıştırıp
 VLH/VLD oyun dosyalarını çözer.
@@ -141,7 +141,7 @@ VLH/VLD oyun dosyalarını çözer.
 Cipher'ı Python'a tam port etmek yerine Goley'in kendi decrypt
 fonksiyonunu (memory dump'tan çıkarılmış `goley_real_code.bin`)
 Unicorn'da çalıştırıyoruz. Böylece Anipark cipher'ında bir edge case
-varsa biz de aynısına takılıyoruz. Detay için `src/extract/README.md`.
+varsa biz de aynısına takılıyoruz. Detay için `extract/README.md`.
 
 ## Veri akışı (Yol A, Themida'lı)
 

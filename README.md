@@ -6,9 +6,10 @@ oynanabilir hâle getirmek için yazılmış tool zinciri.
 
 Proje iki yarımküreden oluşuyor:
 
-1. **Client tarafı** (`src/`): Orijinal client binary'sini Themida
-   packer'ı ve nProtect anti-cheat'i atlatıp çalıştırabilen tool
-   zinciri. Şifreli oyun dosyalarını çözücü de burada.
+1. **Client tarafı** (`tool/`, `patcher/`, `wrapper/`, `extract/`):
+   Orijinal client binary'sini Themida packer'ı ve nProtect
+   anti-cheat'i atlatıp çalıştırabilen tool zinciri. Şifreli oyun
+   dosyalarını çözücü de burada.
 2. **Server tarafı** (`server/`): Artık var olmayan sunucuların yerine
    geçen, Go ile sıfırdan yazılmış emulator (login, lobby, battle,
    patch, launcher web).
@@ -35,11 +36,11 @@ revival/
 │   ├── PATCHES.md              statik binary patch listesi
 │   └── DURUM.md                neyin çalıştığı, neyin açık kaldığı
 │
-├── src/                        CLIENT TARAFI
-│   ├── tool/                   tek CLI (init, launch, extract, patch, ...)
-│   ├── patcher/                Goley_.exe'ye inject edilen DLL
-│   ├── wrapper/                IFEO debugger wrapper
-│   └── extract/                şifreli VLH/VLD oyun dosyası çözücü
+│   CLIENT TARAFI (her biri repo kökünde, kendi build.bat'ıyla derlenir):
+├── tool/                       tek CLI (init, launch, extract, patch, ...)
+├── patcher/                    Goley_.exe'ye inject edilen DLL
+├── wrapper/                    IFEO debugger wrapper
+├── extract/                    şifreli VLH/VLD oyun dosyası çözücü
 │
 └── server/                     SERVER TARAFI (Go emulator)
     ├── README.md               server'a özel kullanım ve mimari
@@ -70,10 +71,10 @@ revival/
 build_all.bat
 
 :: 2) Joygame setup'ını tool'a göster (bir kerelik)
-src\tool\revival_tool.exe init "C:\indirilenler\GoleySetup.exe"
+tool\revival_tool.exe init "C:\indirilenler\GoleySetup.exe"
 
 :: 3) Client'i başlat (Yönetici olarak)
-src\tool\revival_tool.exe launch
+tool\revival_tool.exe launch
 ```
 
 ### Server tarafı
@@ -146,7 +147,7 @@ Varsayılan: `C:\Joygame\Goley\BinaryTr`.
 * `docs/DURUM.md` şu an ne çalışıyor, ne açık
 * `server/README.md` server kullanımı
 * `server/docs/protocol-notes.md` ProudNet protokol notları
-* `src/extract/README.md` şifre çözücü detayları
+* `extract/README.md` şifre çözücü detayları
 
 ## Yapılmayanlar / kapsam dışı
 
@@ -163,7 +164,7 @@ Varsayılan: `C:\Joygame\Goley\BinaryTr`.
 
 MIT (`LICENSE`).
 
-Paketlenmiş MinHook (`src/patcher/minhook/`) BSD 2-Clause.
+Paketlenmiş MinHook (`patcher/minhook/`) BSD 2-Clause.
 
 ## İletişim
 

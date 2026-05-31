@@ -1,4 +1,4 @@
-# src/extract
+# extract
 
 Goley'in şifreli oyun dosyalarını (`.VLH` + `.VLD` çift'leri) açan
 Python script'i. Goley `C:\Joygame\Goley\Data\` altında bütün karakter

@@ -138,26 +138,23 @@ static bool InjectDll(HANDLE hProcess, DWORD pid, const wchar_t* dllPath) {
 }
 
 // DLL ve log dosyasi yollarini exe'nin kendi konumuna gore hesaplar.
-// wrapper.exe su yapida bulunuyor: <repo>/src/wrapper/revival_wrapper.exe
-//   DLL_PATH = <repo>/src/patcher/revival_patcher.dll
+// wrapper.exe su yapida bulunuyor: <repo>/wrapper/revival_wrapper.exe
+//   DLL_PATH = <repo>/patcher/revival_patcher.dll
 //   LOG_PATH = <repo>/wrapper.log
 static void ResolvePaths(void) {
     wchar_t exePath[MAX_PATH] = {0};
     if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) return;
-    // exePath'i parcala: <repo>\src\wrapper\revival_wrapper.exe
-    // Bir seviye yukari -> <repo>\src\wrapper
+    // exePath'i parcala: <repo>\wrapper\revival_wrapper.exe
+    // Bir seviye yukari -> <repo>\wrapper
     wchar_t* slash = wcsrchr(exePath, L'\\');
     if (!slash) return;
     *slash = 0;
-    // Wrapper'in bulundugu klasor: <repo>\src\wrapper
+    // Wrapper'in bulundugu klasor: <repo>\wrapper. patcher/ onun kardes
+    // dizini, yani ..\patcher dogru cozulur.
     wsprintfW(DLL_PATH, L"%s\\..\\patcher\\revival_patcher.dll", exePath);
-    // Log: <repo>\wrapper.log (iki seviye yukari)
-    wchar_t* up1 = wcsrchr(exePath, L'\\');     // <repo>\src
-    if (up1) {
-        *up1 = 0;
-        wchar_t* up2 = wcsrchr(exePath, L'\\'); // <repo>
-        if (up2) { *up2 = 0; }
-    }
+    // Log: <repo>\wrapper.log (bir seviye yukari, repo koku)
+    wchar_t* up1 = wcsrchr(exePath, L'\\');     // <repo>
+    if (up1) { *up1 = 0; }
     wsprintfW(LOG_PATH, L"%s\\wrapper.log", exePath);
 }
 

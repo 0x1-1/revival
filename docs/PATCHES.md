@@ -1,7 +1,7 @@
 # Binary patch'ler
 
 `unpacked_Goley_.exe`'ye uyguladığımız statik patch'lerin tam listesi.
-Tool içindeki `src/tool/patches.json` bu belgenin makine okunabilir hali;
+Tool içindeki `tool/patches.json` bu belgenin makine okunabilir hali;
 biri değişirse diğerini de senkron tutun.
 
 Adresler standart PE `ImageBase = 0x00400000` varsayar.
@@ -95,7 +95,7 @@ IDA Pro veya başka bir RE aracı gerekmez. Sadece Python + JSON.
 çağırıyor. Aynı işin ucuna kadar:
 
 ```bat
-python src\tool\apply_patches.py --src in.exe --dst out.exe
+python tool\apply_patches.py --src in.exe --dst out.exe
 ```
 
 ## Yeni patch eklemek
@@ -104,7 +104,7 @@ python src\tool\apply_patches.py --src in.exe --dst out.exe
    için IDA Pro veya benzeri bir disassembler iyi olur. (Tool zinciri
    IDA gerektirmiyor, ama yeni patch için manuel analiz kaçınılmaz.)
 2. Original ve patched byte'ları belirleyin.
-3. `src/tool/patches.json` içine yeni entry ekleyin:
+3. `tool/patches.json` içine yeni entry ekleyin:
 
    ```json
    {
@@ -118,7 +118,7 @@ python src\tool\apply_patches.py --src in.exe --dst out.exe
    ```
 
 4. `docs/PATCHES.md`'a (bu dosyaya) yeni bir bölüm ekleyin.
-5. Test: `src\tool\revival_tool.exe patch in.exe out.exe && launch-unpacked`.
+5. Test: `tool\revival_tool.exe patch in.exe out.exe && launch-unpacked`.
 6. Working Set'i izleyin. Önceki bilinen iyi değerden düştüyse,
    patch'i geri alın (P-3 hatası).
 

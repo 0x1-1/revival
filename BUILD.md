@@ -15,15 +15,15 @@ Client tarafı için:
   ```
   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat
   ```
-  Sizinkisi farklı yerde ise her `src/*/build.bat` içindeki `VS_PATH`
-  satırını düzenleyin.
+  Sizinkisi farklı yerde ise her bileşenin `build.bat`'ı içindeki
+  `VS_PATH` satırını düzenleyin.
 
 VLD/VLH çözücü için:
 
 * Python 3.10+.
 * Unicorn paketi:
   ```
-  pip install -r src\extract\requirements.txt
+  pip install -r extract\requirements.txt
   ```
 
 Server tarafı için:
@@ -54,17 +54,17 @@ build_all.bat
 Artifact'lar her source ağacının yanında oluşur:
 
 ```
-src/tool/revival_tool.exe
-src/patcher/revival_patcher.dll
-src/wrapper/revival_wrapper.exe
+tool/revival_tool.exe
+patcher/revival_patcher.dll
+wrapper/revival_wrapper.exe
 ```
 
 ## Tek bir client component'i build et
 
 ```bat
-cd src\tool    && build.bat
-cd src\patcher && build.bat
-cd src\wrapper && build.bat
+cd tool    && build.bat
+cd patcher && build.bat
+cd wrapper && build.bat
 ```
 
 Her `build.bat` kendi `vcvars32`'sini set ediyor; Developer Command
@@ -89,7 +89,7 @@ değer değil.
 Hardcoded path yok. Her bileşen kendi yolunu runtime'da hesaplıyor:
 
 * `revival_tool.exe`: `GetModuleFileNameA` ile kendi yolunu bulur,
-  iki seviye yukarı çıkınca repo kökü çıkar.
+  bir seviye yukarı çıkınca repo kökü çıkar.
 * `revival_patcher.dll`: DllMain içinde `GetModuleFileNameA` ile kendi
   yolunu bulur, log dosyasını repo köküne yazar.
 * `revival_wrapper.exe`: `wmain` başında kendi yolundan DLL ve log
@@ -108,20 +108,20 @@ Varsayılan: `C:\Joygame\Goley\BinaryTr`.
 ## Smoke test
 
 ```bat
-src\tool\revival_tool.exe ping
+tool\revival_tool.exe ping
 :: => ok
 
-src\tool\revival_tool.exe help
+tool\revival_tool.exe help
 :: => komut listesi
 ```
 
 ## VLD/VLH çözücü için ekstra setup
 
 ```bat
-pip install -r src\extract\requirements.txt
+pip install -r extract\requirements.txt
 
 :: Sonra:
-src\tool\revival_tool.exe extract
+tool\revival_tool.exe extract
 ```
 
 Unicorn ilk yüklemede 30-50 MB indirir.

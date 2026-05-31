@@ -52,7 +52,7 @@
 //   revival_tool ping     Sanity testi ("ok" yazar).
 //   revival_tool help     Komut listesi.
 //
-// Build: src/tool/build.bat (VS 2022 vcvars32, /MT, /MACHINE:X86)
+// Build: tool/build.bat (VS 2022 vcvars32, /MT, /MACHINE:X86)
 // Output: revival_tool.exe (32-bit, Goley_ thread context'lerini okumak icin)
 
 #define WIN32_LEAN_AND_MEAN
@@ -72,10 +72,10 @@
 // --------------------------------------------------------------------
 // Konfigurasyon: hicbir sey hardcoded degil.
 //
-// Bu .exe nereye konulduysa orasi repo'nun src/tool dizini. Diger
-// artefaktlari oradan iki uste cikarak buluruz. Goley'in kurulu oldugu
-// yer ise once GOLEY_INSTALL_DIR environment variable'indan, yoksa
-// varsayilan C:\Joygame\Goley\BinaryTr'den okunur.
+// Bu .exe nereye konulduysa orasi repo'nun tool/ dizini. Diger
+// artefaktlari bir ust dizinden (repo koku) buluruz. Goley'in kurulu
+// oldugu yer ise once GOLEY_INSTALL_DIR environment variable'indan,
+// yoksa varsayilan C:\Joygame\Goley\BinaryTr'den okunur.
 // --------------------------------------------------------------------
 #include <string>
 
@@ -87,7 +87,7 @@ static std::string DirName(const std::string& path) {
     return (pos == std::string::npos) ? "." : path.substr(0, pos);
 }
 
-// revival_tool.exe iki seviye altta: <repo>/src/tool/revival_tool.exe
+// revival_tool.exe bir seviye altta: <repo>/tool/revival_tool.exe
 // Ondan repo kokunu hesaplariz. Boylece kullanici reponun yerini
 // degistirse bile path'ler dogru gelir.
 static const std::string& RepoRoot() {
@@ -95,8 +95,7 @@ static const std::string& RepoRoot() {
     char buf[MAX_PATH] = {0};
     GetModuleFileNameA(NULL, buf, MAX_PATH);
     std::string p(buf);
-    p = DirName(p);   // .../src/tool
-    p = DirName(p);   // .../src
+    p = DirName(p);   // .../tool
     p = DirName(p);   // .../  <repo root>
     g_repoRoot = p;
     return g_repoRoot;
@@ -119,10 +118,10 @@ namespace cfg {
     // Parent of BinaryTr is the install root (typically C:\Joygame\Goley).
     static std::string GoleyRoot()      { return GoleyDir() + "\\.."; }
     static std::string LauncherExe()    { return GoleyRoot() + "\\Goley.exe"; }
-    static std::string PatcherDll()     { return RepoRoot() + "\\src\\patcher\\revival_patcher.dll"; }
-    static std::string WrapperExe()     { return RepoRoot() + "\\src\\wrapper\\revival_wrapper.exe"; }
-    static std::string ApplyPatchesPy() { return RepoRoot() + "\\src\\tool\\apply_patches.py"; }
-    static std::string DecryptPy()      { return RepoRoot() + "\\src\\extract\\decrypt.py"; }
+    static std::string PatcherDll()     { return RepoRoot() + "\\patcher\\revival_patcher.dll"; }
+    static std::string WrapperExe()     { return RepoRoot() + "\\wrapper\\revival_wrapper.exe"; }
+    static std::string ApplyPatchesPy() { return RepoRoot() + "\\tool\\apply_patches.py"; }
+    static std::string DecryptPy()      { return RepoRoot() + "\\extract\\decrypt.py"; }
     constexpr const char* kIfeoKey   = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\Goley_.exe";
     constexpr const char* kIfeoValue = "Debugger";
 }
@@ -495,7 +494,7 @@ static int CmdInit(int argc, char** argv) {
 // extract: VLH/VLD oyun dosyalarini cozer (Python script'i cagrilir)
 // --------------------------------------------------------------------
 // Goley oyun datasini Anipark'in kendi cipher'i ile sifrelemis.
-// src/extract/decrypt.py Goley'in kendi decrypt fonksiyonunu Unicorn
+// extract/decrypt.py Goley'in kendi decrypt fonksiyonunu Unicorn
 // emulator'de calistirarak Character.VLH/VLD, Stadium.VLH/VLD,
 // Translations.VLH/VLD gibi cift'leri aciyor.
 //

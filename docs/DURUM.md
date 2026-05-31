@@ -29,7 +29,7 @@ Son güncelleme: 2026-05-21.
 * **Yol B (statik patch unpacked binary'e):** binary 42 MB Working
   Set'e kadar geliyor, hiçbir dialog çıkmıyor, ama pencere açılmıyor.
 * P-1 ve P-2 statik patch'ler doğrulandı.
-* VLD/VLH çözücü (`src/extract/decrypt.py`): bütün Anipark şifreli
+* VLD/VLH çözücü (`extract/decrypt.py`): bütün Anipark şifreli
   oyun dosyalarını açıyor (karakterler, stadyumlar, çeviriler).
   Türkçe çeviri tam, Çince Joygame tarafından dahil edilmemiş.
 
