@@ -294,10 +294,10 @@ int wmain(int argc, wchar_t* argv[]) {
         Log(L"DebugActiveProcessStop returned %d (detached debugger)", detached);
     }
 
-    // No Sleep between inject and Resume -- the dnight 22:46 baseline
-    // (which actually produced a visible splash and a stable PID for 80+s)
-    // had no sleep here. Both Sleep(300) and Sleep(80) broke Themida's
-    // internal unpack timer; the unpacker hung at val=0 forever.
+    // No Sleep between inject and Resume. The known-good baseline run
+    // (which produced a visible splash and a stable PID for 80+s) had no
+    // sleep here. Both Sleep(300) and Sleep(80) broke Themida's internal
+    // unpack timer; the unpacker hung at val=0 forever.
     DWORD resumed = ResumeThread(pi.hThread);
     Log(L"ResumeThread returned %lu (prev suspend count)", resumed);
 

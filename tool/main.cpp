@@ -54,6 +54,10 @@
 //
 // Build: tool/build.bat (VS 2022 vcvars32, /MT, /MACHINE:X86)
 // Output: revival_tool.exe (32-bit, Goley_ thread context'lerini okumak icin)
+//
+// Kod duzeni: once konfig (RepoRoot/GoleyDir/cfg namespace), sonra ortak
+// yardimcilar (log, admin check, PID bulma, DLL inject), ardindan her
+// subcommand kendi CmdXxx() fonksiyonunda. En altta main() dispatch eder.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

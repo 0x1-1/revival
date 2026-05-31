@@ -1,7 +1,7 @@
 # Proje durumu
 
 Bu sayfa neyin çalıştığını ve neyin beklediğini günü gününe tutuyor.
-Son güncelleme: 2026-05-21.
+Son güncelleme: 2026-05-31.
 
 ## Çalışan kısımlar
 
@@ -92,6 +92,10 @@ cache durumunda bazen tetikleniyor.
 * VLD çözücü Python script'i + binary blob (`goley_real_code.bin`)
   repoya commit edildi.
 * Server tarafı goley-server'dan repo'ya entegre edildi.
+* Repo düzeni sadeleştirildi: client bileşenleri (`tool/`, `patcher/`,
+  `wrapper/`, `extract/`) `src/` sarmalayıcısından çıkarılıp repo köküne,
+  `server/` ile aynı seviyeye alındı. Path-resolution kodu (bir seviye
+  daha sığ) ve bütün döküman yol referansları güncellendi.
 
 ## Server tarafı TODO
 

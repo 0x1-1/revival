@@ -55,6 +55,9 @@ def rva_to_file_offset(pe_bytes, rva):
 
 
 def apply_patches(src_path, dst_path, patches_json):
+    """src'yi dst'ye kopyalar, sonra patches.json'daki her entry'yi dst
+    uzerinde dogru file offset'e yazar. src'ye dokunmaz (orijinal binary
+    korunur). Tum patch'ler basariyla uygulandiysa True doner."""
     if not os.path.isfile(src_path):
         sys.exit(f"input binary bulunamadi: {src_path}")
     if not os.path.isfile(patches_json):

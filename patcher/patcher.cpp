@@ -14,6 +14,37 @@
 //     olarak kaybetmemis oluyoruz. Detay: docs/THEMIDA_BYPASS.md
 //   - nProtect'in MessageBox dialog'larini IAT hijack + HW BP ile
 //     bastiriyoruz.
+//
+// Dosya haritasi (yukaridan asagiya, okuma sirasi). Ilgili yere
+// fonksiyon adindan ya da "// ====" banner'indan atlayabilirsin:
+//
+//    1. Debug konsolu + Log          kalici disk log + canli konsol
+//    2. VehHandler                   Themida validation BP rewrite,
+//                                     INT3 swallow, AV swallow (VEH)
+//    3. Inline stub patch'leri        kill-API ve MessageBox stub'lari
+//    4. Fn-pointer / IAT tarama       runtime cozulen slot'u degistir
+//    5. Kill-API hook'lari            Exit/TerminateProcess no-op
+//    6. Hardware breakpoint yonetimi  DR0..3 set/clear (tum thread'ler)
+//    7. Thread EIP siniflandirma      takilan thread'i module gore etiketle
+//    8. GG dialog killer              nProtect error penceresini kapat
+//    9. Child process injection       CreateProcessA/W hook + APC inject
+//   10. Wait hook'lari                WaitForSingleObject/Multiple gozlem
+//   11. NMRun param hook'lari         nProtect launcher parametreleri
+//   12. CmdLine hook'lari             GetCommandLine sahteleme
+//   13. Network hook'lari             connect/gethostbyname/getaddrinfo
+//   14. Window audit hook'lari        RegisterClassEx/CreateWindowEx log
+//   15. BugTrap hook'lari             crash reporter'i sustur
+//   16. Module snapshot               yuklu DLL listesini logla
+//   17. Hook init toplayicilari       MinHook grup kurulumlari
+//   18. PatchThread                   ana worker: VEH+HWBP+MinHook loop
+//   19. ResolveLogPath + DllMain      giris noktasi, 4-mode tespiti
+//
+// 4 process modu (DllMain'de exe basename'ine gore secilir):
+//   LAUNCHER (Goley.exe)            gozlemci, armor yok
+//   WRAPPER  (revival_wrapper.exe)  no-op, early return (fork bomb engeli)
+//   STUB     (Goley_.exe)           full armor (Themida bypass + dialog kill)
+//   PAYLOAD  (BinaryTr.bin)         phase-1 minimal observer
+// Modlarin tam gerekcesi: docs/THEMIDA_BYPASS.md ve MIMARI.md.
 
 // winsock2.h MUTLAKA windows.h'tan ONCE include edilmeli.
 #define WIN32_LEAN_AND_MEAN
@@ -177,7 +208,22 @@ static void Log(const char* msg) {
     }
 }
 
-// VEH handler:gets called whenever ANY exception fires in the process.
+// ===========================================================================
+// VehHandler -- vektorlu exception handler (Themida bypass'in kalbi)
+// ===========================================================================
+// Process'te HERHANGI bir exception firladiginda cagrilir; PatchThread bunu
+// AddVectoredExceptionHandler(1, ...) ile en yuksek oncelikte kaydeder. Uc
+// ayri Themida/anti-debug numarasini ele alir:
+//
+//   1. ntdll INT3 (0xCC) yut       EIP+1, debugger-var-mi testini sessizce gec
+//   2. Themida voluntary AV yut    HDE32 ile instruction advance, ya da EIP
+//                                  corrupt ise stack-walk + ret simulasyonu
+//   3. Validation HW BP (DR0)      EXCEPTION_SINGLE_STEP'te EIP'yi success
+//                                  branch'ine (SUCCESS_RVA) yeniden yazar;
+//                                  memory'ye dokunmadigi icin hash check gecer
+//
+// Hicbiri degilse EXCEPTION_CONTINUE_SEARCH ile OS'a birakir (gercek crash
+// yutulmaz). LAUNCHER/PAYLOAD observer modlarinda bazi dallar atlanir.
 static LONG CALLBACK VehHandler(PEXCEPTION_POINTERS exc) {
     DWORD code = exc->ExceptionRecord->ExceptionCode;
     DWORD eip = exc->ContextRecord->Eip;
@@ -2586,6 +2632,12 @@ static BOOL InitCreateProcessHooks() {
 }
 
 DWORD WINAPI PatchThread(LPVOID lpParam) {
+    // DllMain bunu async baslatir (loader lock disinda guvenli is yeri).
+    // Process moduna gore once gozlemci ya da full-armor "game body" yolunu
+    // kosar, sonra 20Hz refresh loop'una girer: HW BP tazele, dialog killer
+    // durumu, IAT hijack kontrolu. Inline armor zaten DllMain'de kurulmus
+    // olur; burasi loader-lock disinda kalan, surekli calisan kisim.
+    //
     // =========================================================
     // OBSERVER MODE PATH (LAUNCHER veya PAYLOAD)
     // =========================================================
